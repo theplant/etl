@@ -64,16 +64,13 @@ func New[T any](db *gorm.DB, req *etl.ExtractRequest[T], datas etl.TargetDatas, 
 		return nil, err
 	}
 
-	// Filter out empty tables to avoid creating unnecessary staging tables
-	filteredDatas := datas.FilterNonEmpty()
-
 	if db.PrepareStmt {
 		return nil, errors.New("PrepareStmt is not supported: it conflicts with multi-statement SQL execution which is commonly used in ETL operations")
 	}
 
 	return &Target[T]{
 		db:            db,
-		datas:         filteredDatas,
+		datas:         datas,
 		commitFunc:    commitFunc,
 		req:           req,
 		stagingTables: make(map[string]string),
