@@ -95,7 +95,7 @@ func (t *Target[T]) WithCreateStagingTableHook(hooks ...hook.Hook[CreateStagingT
 
 func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (*CreateStagingTableOutput, error) {
 	createSQL := fmt.Sprintf(`
-			CREATE UNLOGGED TABLE IF NOT EXISTS %s 
+			CREATE TEMP TABLE IF NOT EXISTS %s 
 			(LIKE %s INCLUDING ALL);
 			
 			TRUNCATE TABLE %s;
