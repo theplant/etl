@@ -39,13 +39,9 @@ func (req *ExtractRequest[T]) String() string {
 	if stringer, ok := any(req.After).(fmt.Stringer); ok {
 		after = stringer.String()
 	} else {
-		after = fmt.Sprintf("%v", req.After)
+		after = fmt.Sprint(req.After)
 	}
-	return fmt.Sprintf("%s_%d_%s_%s",
-		after,
-		req.First,
-		req.FromAt.Format(TimeLayout),
-		req.BeforeAt.Format(TimeLayout))
+	return after
 }
 
 // ExtractResponse represents the response from source data read

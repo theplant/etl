@@ -2,17 +2,16 @@ module github.com/theplant/etl
 
 go 1.24.0
 
-toolchain go1.24.2
-
 require (
 	cloud.google.com/go/bigquery v1.72.0
 	github.com/pkg/errors v0.9.1
 	github.com/qor5/go-bus v0.0.0-20250731113321-2c127f29aaaa
-	github.com/qor5/go-que v1.1.0
+	github.com/qor5/go-que v1.1.1
 	github.com/qor5/x/v3 v3.2.0
 	github.com/samber/lo v1.52.0
 	github.com/stretchr/testify v1.11.1
 	github.com/theplant/appkit v0.0.0-20250528023215-3d0d299dc4c6
+	google.golang.org/api v0.254.0
 	gorm.io/datatypes v1.2.7
 	gorm.io/gorm v1.31.0
 )
@@ -159,7 +158,6 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.38.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
-	google.golang.org/api v0.254.0 // indirect
 	google.golang.org/genproto v0.0.0-20251103181224-f26f9409b101 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251103181224-f26f9409b101 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251103181224-f26f9409b101 // indirect

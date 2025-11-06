@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,50 +42,54 @@ type CreateStagingTableOutput struct {
 // CreateStagingTableFunc defines the function signature for creating staging tables
 type CreateStagingTableFunc[T any] func(ctx context.Context, input *CreateStagingTableInput[T]) (*CreateStagingTableOutput, error)
 
+// Config represents the configuration for creating a PostgreSQL target
+type Config[T any] struct {
+	DB               *gorm.DB
+	Req              *etl.ExtractRequest[T]
+	Datas            etl.TargetDatas
+	CommitFunc       CommitFunc[T]
+	UseUnloggedTable bool // If true, use UNLOGGED TABLE instead of TEMP TABLE. Default: false (TEMP TABLE is preferred for easier database permission management, UNLOGGED TABLE is better for traceability)
+}
+
 // Target implements the Target interface for PostgreSQL
 type Target[T any] struct {
-	db                     *gorm.DB
-	datas                  etl.TargetDatas
-	commitFunc             CommitFunc[T]
-	req                    *etl.ExtractRequest[T]
-	stagingTables          map[string]string // Track staging tables for cleanup
+	Config                 *Config[T]
+	StagingTables          map[string]string // Track staging tables for cleanup
 	createStagingTableHook hook.Hook[CreateStagingTableFunc[T]]
 }
 
 var _ etl.Target = (*Target[any])(nil)
 
-// New creates a new PostgreSQL target
-func New[T any](db *gorm.DB, req *etl.ExtractRequest[T], datas etl.TargetDatas, commitFunc CommitFunc[T]) (*Target[T], error) {
-	if commitFunc == nil {
-		return nil, errors.New("commitFunc is required")
+// New creates a new PostgreSQL target with the given configuration
+func New[T any](cfg *Config[T]) (*Target[T], error) {
+	if cfg == nil {
+		return nil, errors.New("config is required")
 	}
 
-	// Validate data structure first
-	if err := datas.Validate(); err != nil {
-		return nil, err
+	if cfg.DB == nil {
+		return nil, errors.New("db is required")
 	}
 
-	if db.PrepareStmt {
+	if cfg.DB.PrepareStmt {
 		return nil, errors.New("PrepareStmt is not supported: it conflicts with multi-statement SQL execution which is commonly used in ETL operations")
 	}
 
+	if cfg.Req == nil {
+		return nil, errors.New("req is required")
+	}
+
+	if err := cfg.Datas.Validate(); err != nil {
+		return nil, err
+	}
+
+	if cfg.CommitFunc == nil {
+		return nil, errors.New("commitFunc is required")
+	}
+
 	return &Target[T]{
-		db:            db,
-		datas:         datas,
-		commitFunc:    commitFunc,
-		req:           req,
-		stagingTables: make(map[string]string),
+		Config:        cfg,
+		StagingTables: make(map[string]string),
 	}, nil
-}
-
-// Datas returns the target datas associated with this target.
-func (t *Target[T]) Datas() etl.TargetDatas {
-	return t.datas
-}
-
-// DB returns the GORM DB instance associated with this target.
-func (t *Target[T]) DB() *gorm.DB {
-	return t.db
 }
 
 // WithCreateStagingTableHook adds a hook to the target for creating staging tables
@@ -94,14 +99,33 @@ func (t *Target[T]) WithCreateStagingTableHook(hooks ...hook.Hook[CreateStagingT
 }
 
 func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (*CreateStagingTableOutput, error) {
-	// Use TEMP TABLE instead of UNLOGGED TABLE because unlogged tables are not convenient for database permission management
+	// Validate staging table name
+	if err := validateTableName(input.StagingTable); err != nil {
+		return nil, errors.Wrapf(err, "invalid staging table name: %s", input.StagingTable)
+	}
+
+	// Validate target table name
+	if err := validateTableName(input.TargetTable); err != nil {
+		return nil, errors.Wrapf(err, "invalid target table name: %s", input.TargetTable)
+	}
+
+	// Use TEMP TABLE by default, or UNLOGGED TABLE if configured
+	// TEMP TABLE is preferred for easier database permission management
+	// UNLOGGED TABLE is better for traceability but requires checking database restart time to detect silent failures
+	var tableType string
+	if input.Target.Config.UseUnloggedTable {
+		tableType = "UNLOGGED"
+	} else {
+		tableType = "TEMP"
+	}
+
 	createSQL := fmt.Sprintf(`
-			CREATE TEMP TABLE IF NOT EXISTS %s 
+			CREATE %s TABLE IF NOT EXISTS %s 
 			(LIKE %s INCLUDING ALL);
 			
 			TRUNCATE TABLE %s;
 			`,
-		input.StagingTable, input.TargetTable, input.StagingTable)
+		tableType, input.StagingTable, input.TargetTable, input.StagingTable)
 
 	if err := input.Tx.WithContext(ctx).Exec(createSQL).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed to create staging table %s", input.StagingTable)
@@ -112,26 +136,31 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 
 // Load processes and writes the data to PostgreSQL target system
 func (t *Target[T]) Load(ctx context.Context) error {
-	if len(t.datas) == 0 {
+	if len(t.Config.Datas) == 0 {
 		return nil // Nothing to write
 	}
 
-	db := t.db.WithContext(ctx)
+	db := t.Config.DB.WithContext(ctx)
 
-	// Record database start time at the beginning of Load
+	// Record database start time at the beginning of Load (only needed for UNLOGGED tables)
 	// This will be verified at the end to detect database restarts during the Load process
 	// Database restart is the only silent failure scenario for UNLOGGED tables
-	initialStartedAt, err := t.getDBStartedAt(ctx)
-	if err != nil {
-		return err
+	// TEMP TABLE doesn't need this check because it's automatically cleaned up on session end
+	var initialStartedAt time.Time
+	if t.Config.UseUnloggedTable {
+		var err error
+		initialStartedAt, err = t.getDBStartedAt(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Prepare: create or reuse staging tables in data order
-	stagingSuffix := strings.ToLower(fmt.Sprintf("_staging_%s", t.req.String()))
+	stagingSuffix := strings.ToLower(fmt.Sprintf("_stg_%s", t.Config.Req.String()))
 
-	t.stagingTables = make(map[string]string)
+	t.StagingTables = make(map[string]string)
 	if err := db.Transaction(func(tx *gorm.DB) error {
-		for _, data := range t.datas {
+		for _, data := range t.Config.Datas {
 			createStagingTableFunc := createStagingTable[T]
 			if t.createStagingTableHook != nil {
 				createStagingTableFunc = t.createStagingTableHook(createStagingTableFunc)
@@ -147,7 +176,7 @@ func (t *Target[T]) Load(ctx context.Context) error {
 				return errors.Wrapf(err, "failed to create staging table for %s", data.Table)
 			}
 
-			t.stagingTables[data.Table] = output.StagingTable
+			t.StagingTables[data.Table] = output.StagingTable
 		}
 		return nil
 	}); err != nil {
@@ -155,8 +184,8 @@ func (t *Target[T]) Load(ctx context.Context) error {
 	}
 
 	// Write: insert data into staging tables
-	for _, data := range t.datas {
-		stagingTable := t.stagingTables[data.Table]
+	for _, data := range t.Config.Datas {
+		stagingTable := t.StagingTables[data.Table]
 
 		if data.Records == nil {
 			continue
@@ -175,23 +204,26 @@ func (t *Target[T]) Load(ctx context.Context) error {
 
 	// Execute commit function (required)
 	// Note: commitFunc may modify staging table data (e.g., deduplication, incremental updates)
-	if _, err := t.commitFunc(ctx, &CommitInput[T]{
+	if _, err := t.Config.CommitFunc(ctx, &CommitInput[T]{
 		Target:        t,
-		StagingTables: t.stagingTables,
+		StagingTables: t.StagingTables,
 	}); err != nil {
 		return errors.Wrap(err, "commit function failed")
 	}
 
-	// Verify database has not restarted during the Load process
+	// Verify database has not restarted during the Load process (only for UNLOGGED tables)
 	// This is the only silent failure scenario for UNLOGGED tables
 	// All other failures (write errors, I/O errors, etc.) return explicit errors
-	currentStartedAt, err := t.getDBStartedAt(ctx)
-	if err != nil {
-		return err
-	}
-	if !currentStartedAt.Equal(initialStartedAt) {
-		return errors.Errorf("database restarted during Load process (started at changed from %v to %v)",
-			initialStartedAt, currentStartedAt)
+	// TEMP TABLE doesn't need this check because it's automatically cleaned up on session end
+	if t.Config.UseUnloggedTable {
+		currentStartedAt, err := t.getDBStartedAt(ctx)
+		if err != nil {
+			return err
+		}
+		if !currentStartedAt.Equal(initialStartedAt) {
+			return errors.Errorf("database restarted during Load process (started at changed from %v to %v)",
+				initialStartedAt, currentStartedAt)
+		}
 	}
 
 	return nil
@@ -200,25 +232,55 @@ func (t *Target[T]) Load(ctx context.Context) error {
 // Cleanup cleans up staging tables (only called on successful completion)
 func (t *Target[T]) Cleanup(ctx context.Context) error {
 	// Drop staging tables in reverse order (reverse dependency order)
-	for i := len(t.datas) - 1; i >= 0; i-- {
-		stagingTable := t.stagingTables[t.datas[i].Table]
+	for i := len(t.Config.Datas) - 1; i >= 0; i-- {
+		stagingTable := t.StagingTables[t.Config.Datas[i].Table]
 		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable)
-		if err := t.db.WithContext(ctx).Exec(dropSQL).Error; err != nil {
+		if err := t.Config.DB.WithContext(ctx).Exec(dropSQL).Error; err != nil {
 			return errors.Wrapf(err, "failed to cleanup staging table %s", stagingTable)
 		}
 
 	}
 
 	// Clear the staging tables map after cleanup
-	t.stagingTables = make(map[string]string)
+	t.StagingTables = make(map[string]string)
 	return nil
 }
 
 // getDBStartedAt returns the PostgreSQL database start time
 func (t *Target[T]) getDBStartedAt(ctx context.Context) (time.Time, error) {
 	var startedAt time.Time
-	if err := t.db.WithContext(ctx).Raw("SELECT pg_postmaster_start_time()").Scan(&startedAt).Error; err != nil {
+	if err := t.Config.DB.WithContext(ctx).Raw("SELECT pg_postmaster_start_time()").Scan(&startedAt).Error; err != nil {
 		return time.Time{}, errors.Wrap(err, "failed to query database start time")
 	}
 	return startedAt, nil
+}
+
+var (
+	// tableNameRegex validates that table name starts with letter or underscore,
+	// and contains only letters, numbers, and underscores
+	tableNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+)
+
+// validateTableName validates that a table name follows PostgreSQL identifier rules
+// - Must be between 1 and 63 bytes (PostgreSQL NAMEDATALEN - 1)
+// - Must start with a letter or underscore
+// - Can contain letters, numbers, and underscores
+func validateTableName(name string) error {
+	if len(name) == 0 {
+		return errors.New("table name cannot be empty")
+	}
+
+	// Check byte length (PostgreSQL identifier limit is 63 bytes)
+	// In Go, len(string) returns the byte length, not the character count
+	if len(name) > 63 {
+		return errors.Errorf("table name exceeds maximum length of 63 bytes: %d", len(name))
+	}
+
+	// Check that table name follows PostgreSQL identifier rules
+	// Must start with letter or underscore, and can contain letters, numbers, and underscores
+	if !tableNameRegex.MatchString(name) {
+		return errors.Errorf("table name contains invalid characters: %s (must start with letter or underscore, and can only contain letters, numbers, and underscores)", name)
+	}
+
+	return nil
 }

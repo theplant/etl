@@ -242,7 +242,13 @@ func (s *identitySyncer) Extract(ctx context.Context, req *etl.ExtractRequest[*e
 	}
 
 	// Create target
-	target, err := pgtarget.New(s.targetDB, req, datas, s.commit)
+	target, err := pgtarget.New(&pgtarget.Config[*etl.Cursor]{
+		DB:               s.targetDB,
+		Req:              req,
+		Datas:            datas,
+		CommitFunc:       s.commit,
+		UseUnloggedTable: false, // The default is to use the temp table.
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +414,7 @@ func (s *identitySyncer) commit(ctx context.Context, input *pgtarget.CommitInput
 					
 		`
 
-	if err := input.DB().WithContext(ctx).Exec(query).Error; err != nil {
+	if err := input.Config.DB.WithContext(ctx).Exec(query).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed to execute commit query")
 	}
 
@@ -788,7 +794,7 @@ func TestPipeline_BQTarget(t *testing.T) {
 
 	// Wait for ETL to complete
 	// BigQuery may have eventual consistency, so we wait for data to be available
-	time.Sleep(30 * time.Second)
+	time.Sleep(60 * time.Second)
 
 	// Verify results in BigQuery after this sync
 	verifyBigQueryTargetData(t, ctx, client, dataset)
@@ -812,7 +818,7 @@ func TestPipeline_BQTarget(t *testing.T) {
 	// Wait for next ETL cycle to process the soft deletes
 	// BigQuery may have eventual consistency, so we wait for data to be available
 	t.Log("   - Waiting for next ETL cycle to process soft deletes...")
-	time.Sleep(30 * time.Second)
+	time.Sleep(60 * time.Second)
 
 	// Verify that Alice and her credentials are physically deleted from BigQuery
 	verifyBigQueryTargetDataAfterDeletion(t, ctx, client, dataset)
@@ -914,14 +920,19 @@ func (s *identityBQSyncer) Extract(ctx context.Context, req *etl.ExtractRequest[
 	}
 
 	// Create BigQuery target
-	target, err := bqtarget.New(s.client, s.dataset, req, datas, s.commit)
+	target, err := bqtarget.New(&bqtarget.Config[*etl.Cursor]{
+		Client:     s.client,
+		DatasetID:  s.dataset.DatasetID,
+		Req:        req,
+		Datas:      datas,
+		CommitFunc: s.commit,
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	// Add metadata column hook
-	target.WithCreateStagingTableHook(bqtarget.AddMetadataColumnHook[*etl.Cursor]).
-		WithStagingTableTTL(2 * time.Hour)
+	target.WithCreateStagingTableHook(bqtarget.AddMetadataColumnHook[*etl.Cursor])
 
 	return &etl.ExtractResponse[*etl.Cursor]{
 		Target:      target,
@@ -1019,10 +1030,9 @@ func (s *identityBQSyncer) transform(_ context.Context, users []*User) (etl.Targ
 }
 
 func (s *identityBQSyncer) commit(ctx context.Context, input *bqtarget.CommitInput[*etl.Cursor]) (*bqtarget.CommitOutput[*etl.Cursor], error) {
-	client := input.Client()
-	dataset := input.Dataset()
+	client := input.Config.Client
 	projectID := client.Project()
-	datasetID := dataset.DatasetID
+	datasetID := input.Config.DatasetID
 
 	identitiesStagingTable := input.StagingTables["identities"]
 	credentialsStagingTable := input.StagingTables["credentials"]
@@ -1563,25 +1573,28 @@ func setupBQTables(t *testing.T, ctx context.Context, projectID, datasetID strin
 	require.NoError(t, err, "Failed to create BigQuery client")
 	t.Cleanup(func() { _ = client.Close() })
 
-	// Create or get dataset
+	// Create dataset if it doesn't exist
 	dataset := client.Dataset(datasetID)
-	_, err = dataset.Metadata(ctx)
-	if bqtarget.IsNotFound(err) {
-		// Dataset doesn't exist, create it
-		meta := &bigquery.DatasetMetadata{
-			Location: "asia-northeast1", // Tokyo region
+	meta, err := dataset.Metadata(ctx)
+	if err != nil {
+		if bqtarget.IsNotFound(err) {
+			// Dataset doesn't exist, create it
+			meta := &bigquery.DatasetMetadata{
+				Location: "asia-northeast1", // Tokyo region
+			}
+			err = dataset.Create(ctx, meta)
+			require.NoError(t, err, "Failed to create dataset")
+			t.Logf("Created dataset: %s.%s (location: asia-northeast1, Tokyo)", projectID, datasetID)
+		} else {
+			require.NoError(t, err, "Failed to check dataset existence %s", datasetID)
 		}
-		err = dataset.Create(ctx, meta)
-		require.NoError(t, err, "Failed to create dataset")
-		t.Logf("Created dataset: %s.%s (location: asia-northeast1, Tokyo)", projectID, datasetID)
-	} else if err != nil {
-		require.NoError(t, err, "Failed to check dataset metadata")
 	} else {
-		t.Logf("Dataset already exists: %s.%s", projectID, datasetID)
+		// Dataset exists, use it
+		t.Logf("Using existing dataset: %s.%s (location: %s)", projectID, datasetID, meta.Location)
 	}
 
 	// Create tables in the dataset
-	createTables(t, ctx, dataset)
+	createTables(t, ctx, client, dataset)
 
 	return client, dataset
 }
@@ -1592,7 +1605,7 @@ type TableConfig struct {
 	Model interface{}
 }
 
-func createTables(t *testing.T, ctx context.Context, dataset *bigquery.Dataset) {
+func createTables(t *testing.T, ctx context.Context, client *bigquery.Client, dataset *bigquery.Dataset) {
 	tableConfigs := []TableConfig{
 		{
 			Name:  "identities",
@@ -1609,28 +1622,16 @@ func createTables(t *testing.T, ctx context.Context, dataset *bigquery.Dataset) 
 	}
 
 	for _, config := range tableConfigs {
-		recreateTable(t, ctx, dataset, config)
+		recreateTable(t, ctx, client, dataset, config)
 	}
 }
 
-// recreateTable deletes the table if it exists and creates a new one
+// recreateTable creates the table if it doesn't exist, or truncates it if it exists
 // This ensures a clean state for each test run
-func recreateTable(t *testing.T, ctx context.Context, dataset *bigquery.Dataset, config TableConfig) {
+func recreateTable(t *testing.T, ctx context.Context, client *bigquery.Client, dataset *bigquery.Dataset, config TableConfig) {
 	table := dataset.Table(config.Name)
-	_, err := table.Metadata(ctx)
-	if err == nil {
-		// Table exists, delete it first to ensure clean state
-		err = table.Delete(ctx)
-		if err != nil {
-			t.Logf("Warning: Failed to delete existing table %s: %v", config.Name, err)
-		} else {
-			t.Logf("Deleted existing table: %s", config.Name)
-		}
-	} else if !bqtarget.IsNotFound(err) {
-		require.NoError(t, err, "Failed to check table metadata for %s", config.Name)
-	}
 
-	// Create the table
+	// Infer schema
 	schema, err := bigquery.InferSchema(config.Model)
 	require.NoError(t, err, "Failed to infer schema for %s", config.Name)
 
@@ -1643,9 +1644,17 @@ func recreateTable(t *testing.T, ctx context.Context, dataset *bigquery.Dataset,
 	meta := &bigquery.TableMetadata{
 		Schema: schema,
 	}
+
+	// Try to create the table
 	err = table.Create(ctx, meta)
-	require.NoError(t, err, "Failed to create table %s", config.Name)
-	t.Logf("Created table: %s", config.Name)
+	if err != nil {
+		// If table already exists, truncate it using TruncateExistTable
+		err = bqtarget.TruncateExistTable(ctx, err, client, dataset.DatasetID, config.Name)
+		require.NoError(t, err, "Failed to create or truncate table %s", config.Name)
+		t.Logf("Truncated existing table: %s", config.Name)
+	} else {
+		t.Logf("Created table: %s", config.Name)
+	}
 }
 
 // removeMetadataField removes the __etl_metadata__ field from schema
