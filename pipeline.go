@@ -445,9 +445,8 @@ func (s *Pipeline[T]) createNextExtractRequest(req *ExtractRequest[T], result *P
 		}
 	}
 
-	var emptyCursor T
 	return &ExtractRequest[T]{
-		After:    emptyCursor,
+		After:    result.NewCursor,
 		First:    s.PageSize,
 		FromAt:   req.BeforeAt, // next interval
 		BeforeAt: time.Time{},
