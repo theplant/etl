@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -747,6 +748,10 @@ type BQCredentialIdentifier struct {
 }
 
 func TestPipeline_BQTarget(t *testing.T) {
+	if os.Getenv("RUN_BIGQUERY_TESTS") != "true" {
+		t.Skipf("Skipping BigQuery Test: %s", t.Name())
+		return
+	}
 	ctx := context.Background()
 
 	// Setup source database and pipeline database
