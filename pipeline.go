@@ -410,7 +410,7 @@ func (s *Pipeline[T]) handleSuccess(ctx context.Context, job que.Job, req *Extra
 		defer job.In(nil)
 
 		// Mark current job as completed
-		if err := job.Done(ctx); err != nil {
+		if err := job.Destroy(ctx); err != nil {
 			return errors.Wrap(err, "failed to mark job as done")
 		}
 
