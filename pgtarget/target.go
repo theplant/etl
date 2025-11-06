@@ -94,6 +94,7 @@ func (t *Target[T]) WithCreateStagingTableHook(hooks ...hook.Hook[CreateStagingT
 }
 
 func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (*CreateStagingTableOutput, error) {
+	// Use TEMP TABLE instead of UNLOGGED TABLE because unlogged tables are not convenient for database permission management
 	createSQL := fmt.Sprintf(`
 			CREATE TEMP TABLE IF NOT EXISTS %s 
 			(LIKE %s INCLUDING ALL);

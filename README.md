@@ -238,6 +238,7 @@ target.AddCreateStagingTableHook(func(ctx context.Context, input *pgtarget.Creat
     // Custom table creation logic
     customTable := fmt.Sprintf("%s_custom", input.StagingTable)
 
+    // Use TEMP TABLE instead of UNLOGGED TABLE because unlogged tables are not convenient for database permission management
     query := fmt.Sprintf(`
         CREATE TEMP TABLE %s (
             LIKE %s INCLUDING ALL

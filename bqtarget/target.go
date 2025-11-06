@@ -142,6 +142,7 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 
 	// Create staging table using CREATE TABLE LIKE
 	// BigQuery supports CREATE TABLE LIKE which copies schema, partitioning, clustering, and options
+	// We don't use TEMP TABLE because for BigQuery, session management is not convenient
 	// Add expiration_timestamp option to automatically clean up staging tables
 	createQuery := fmt.Sprintf(`CREATE TABLE %s.%s.%s LIKE %s.%s.%s`,
 		projectID, datasetID, input.StagingTable,
