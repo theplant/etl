@@ -57,6 +57,7 @@ type Target[T any] struct {
 
 var _ etl.Target = (*Target[any])(nil)
 
+// TODO: 搞个 *Config struct 来初始化 target ，并且依赖于 DatasetID 而非 Dataset
 // New creates a new BigQuery target
 func New[T any](client *bigquery.Client, dataset *bigquery.Dataset, req *etl.ExtractRequest[T], datas etl.TargetDatas, commitFunc CommitFunc[T]) (*Target[T], error) {
 	if commitFunc == nil {
@@ -116,12 +117,12 @@ func (t *Target[T]) WithStagingTableTTL(ttl time.Duration) *Target[T] {
 
 func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (*CreateStagingTableOutput, error) {
 	// Validate staging table name
-	if err := validateBQTableName(input.StagingTable); err != nil {
+	if err := validateTableName(input.StagingTable); err != nil {
 		return nil, errors.Wrapf(err, "invalid staging table name: %s", input.StagingTable)
 	}
 
 	// Validate target table name
-	if err := validateBQTableName(input.TargetTable); err != nil {
+	if err := validateTableName(input.TargetTable); err != nil {
 		return nil, errors.Wrapf(err, "invalid target table name: %s", input.TargetTable)
 	}
 
@@ -181,8 +182,6 @@ func (t *Target[T]) Load(ctx context.Context) error {
 
 	t.stagingTables = make(map[string]string)
 	for _, data := range t.datas {
-		stagingTableName := data.Table + stagingSuffix
-
 		createStagingTableFunc := createStagingTable[T]
 		if t.createStagingTableHook != nil {
 			createStagingTableFunc = t.createStagingTableHook(createStagingTableFunc)
@@ -191,7 +190,7 @@ func (t *Target[T]) Load(ctx context.Context) error {
 		output, err := createStagingTableFunc(ctx, &CreateStagingTableInput[T]{
 			Target:       t,
 			TargetTable:  data.Table,
-			StagingTable: stagingTableName,
+			StagingTable: data.Table + stagingSuffix,
 		})
 		if err != nil {
 			return errors.Wrapf(err, "failed to create staging table for %s", data.Table)
@@ -278,14 +277,12 @@ func IsNotFound(err error) bool {
 	return apiErr.Code == http.StatusNotFound
 }
 
-var (
-	// bqTableNameRegex validates that table name contains only letters, numbers, and underscores
-	bqTableNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
-)
+// bqTableNameRegex validates that table name contains only letters, numbers, and underscores
+var bqTableNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
-// validateBQTableName validates that a table name contains only letters, numbers, and underscores
+// validateTableName validates that a table name contains only letters, numbers, and underscores
 // - Must be between 1 and 1024 UTF-8 bytes
-func validateBQTableName(name string) error {
+func validateTableName(name string) error {
 	if len(name) == 0 {
 		return errors.New("table name cannot be empty")
 	}

@@ -53,6 +53,7 @@ type Target[T any] struct {
 
 var _ etl.Target = (*Target[any])(nil)
 
+// TODO: 搞个 *Config struct 来初始化 target
 // New creates a new PostgreSQL target
 func New[T any](db *gorm.DB, req *etl.ExtractRequest[T], datas etl.TargetDatas, commitFunc CommitFunc[T]) (*Target[T], error) {
 	if commitFunc == nil {
@@ -222,3 +223,5 @@ func (t *Target[T]) getDBStartedAt(ctx context.Context) (time.Time, error) {
 	}
 	return startedAt, nil
 }
+
+// TODO: validateTableName
