@@ -72,8 +72,8 @@ func New[T any](cfg *Config[T]) (*Target[T], error) {
 		return nil, errors.New("client is required")
 	}
 
-	if cfg.DatasetID == "" {
-		return nil, errors.New("datasetID is required")
+	if err := validateDatasetID(cfg.DatasetID); err != nil {
+		return nil, errors.Wrapf(err, "invalid datasetID: %s", cfg.DatasetID)
 	}
 
 	if cfg.Req == nil {
@@ -321,6 +321,32 @@ func validateTableName(name string) error {
 	// Check that all characters are letters, numbers, or underscores using regex
 	if !tableNameRegex.MatchString(name) {
 		return errors.Errorf("table name contains invalid characters: %s (only letters, numbers, and underscores are allowed)", name)
+	}
+
+	return nil
+}
+
+// datasetIDRegex validates that dataset ID contains only letters, numbers, and underscores
+var datasetIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
+// validateDatasetID validates that a dataset ID contains only letters, numbers, and underscores
+// - Must be between 1 and 1024 UTF-8 bytes
+// BigQuery dataset ID follows the same rules as table names: letters, numbers, and underscores only
+func validateDatasetID(datasetID string) error {
+	if len(datasetID) == 0 {
+		return errors.New("dataset ID cannot be empty")
+	}
+
+	// Check UTF-8 byte length (not character count)
+	// In Go, len(string) returns the byte length, not the character count
+	if len(datasetID) > 1024 {
+		return errors.Errorf("dataset ID exceeds maximum length of 1024 UTF-8 bytes: %d", len(datasetID))
+	}
+
+	// Check that all characters are letters, numbers, or underscores using regex
+	// BigQuery dataset ID follows the same rules as table names
+	if !datasetIDRegex.MatchString(datasetID) {
+		return errors.Errorf("dataset ID contains invalid characters: %s (only letters, numbers, and underscores are allowed)", datasetID)
 	}
 
 	return nil
