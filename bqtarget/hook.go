@@ -19,9 +19,9 @@ func AddMetadataColumnHook[T any](next CreateStagingTableFunc[T]) CreateStagingT
 		}
 
 		// Get client and dataset info for DDL statement
-		client := input.Target.Client()
+		client := input.Target.Config.Client
 		projectID := client.Project()
-		datasetID := input.Target.Dataset().DatasetID
+		datasetID := input.Target.Config.DatasetID
 
 		// Use DDL ALTER TABLE to add metadata column
 		// This avoids ETag conflicts and is more robust than Update API

@@ -2,8 +2,6 @@ module github.com/theplant/etl
 
 go 1.24.0
 
-toolchain go1.24.2
-
 require (
 	cloud.google.com/go/bigquery v1.72.0
 	github.com/pkg/errors v0.9.1

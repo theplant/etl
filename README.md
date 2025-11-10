@@ -9,6 +9,7 @@ A type-safe, reliable ETL (Extract, Transform, Load) framework for Go with built
 - **Circuit Breaker**: Automatic failure detection and recovery mechanism
 - **Pagination Support**: Efficient data processing with configurable page sizes
 - **PostgreSQL Target**: Built-in support for PostgreSQL with staging tables
+- **BigQuery Target**: Built-in support for Google BigQuery with staging tables
 - **Transaction Safety**: Atomic commits with rollback support
 - **Incremental Sync**: Process only changed data with cursor-based tracking
 - **Error Notification**: Pluggable error notification system
@@ -166,6 +167,14 @@ The `pgtarget` package provides a PostgreSQL implementation with:
 - Custom commit logic via `CommitFunc`
 - Automatic cleanup on success
 
+The `bqtarget` package provides a BigQuery implementation with:
+
+- Automatic staging table creation using `CREATE TABLE LIKE`
+- Batch inserts with BigQuery Inserter
+- Custom commit logic via `CommitFunc`
+- Automatic cleanup on success
+- Staging table expiration for automatic cleanup
+
 ### Cursor
 
 Cursors track processing progress and enable incremental sync:
@@ -238,7 +247,6 @@ target.AddCreateStagingTableHook(func(ctx context.Context, input *pgtarget.Creat
     // Custom table creation logic
     customTable := fmt.Sprintf("%s_custom", input.StagingTable)
 
-    // Use TEMP TABLE instead of UNLOGGED TABLE because unlogged tables are not convenient for database permission management
     query := fmt.Sprintf(`
         CREATE TEMP TABLE %s (
             LIKE %s INCLUDING ALL
@@ -250,6 +258,54 @@ target.AddCreateStagingTableHook(func(ctx context.Context, input *pgtarget.Creat
     }
 
     return &pgtarget.CreateStagingTableOutput{
+        StagingTable: customTable,
+    }, nil
+})
+```
+
+For BigQuery:
+
+```go
+target, err := bqtarget.New(&bqtarget.Config[*etl.Cursor]{
+    Client:    bqClient,
+    DatasetID: "my_dataset",
+    Req:       req,
+    Datas:     datas,
+    CommitFunc: commitFunc,
+})
+
+// Add custom hook for staging table creation
+target.AddCreateStagingTableHook(func(ctx context.Context, input *bqtarget.CreateStagingTableInput[*etl.Cursor]) (*bqtarget.CreateStagingTableOutput, error) {
+    // Custom table creation logic - customize table name
+    customTable := fmt.Sprintf("%s_custom", input.StagingTable)
+    
+    // Use CREATE TABLE LIKE with expiration for automatic cleanup
+    projectID := input.Target.Config.Client.Project()
+    datasetID := input.Target.Config.DatasetID
+    
+    createQuery := fmt.Sprintf(`CREATE TABLE %s.%s.%s LIKE %s.%s.%s`,
+        projectID, datasetID, customTable,
+        projectID, datasetID, input.TargetTable)
+    
+    createQuery += fmt.Sprintf(` OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL %d SECOND))`,
+        int(input.Target.Config.StagingTableTTL.Seconds()))
+    
+    q := input.Target.Config.Client.Query(createQuery)
+    job, err := q.Run(ctx)
+    if err != nil {
+        return nil, err
+    }
+    
+    status, err := job.Wait(ctx)
+    if err != nil {
+        return nil, err
+    }
+    
+    if status.Err() != nil {
+        return nil, status.Err()
+    }
+    
+    return &bqtarget.CreateStagingTableOutput{
         StagingTable: customTable,
     }, nil
 })
