@@ -414,7 +414,7 @@ func (s *identitySyncer) commit(ctx context.Context, input *pgtarget.CommitInput
 					
 		`
 
-	if err := input.Config.DB.WithContext(ctx).Exec(query).Error; err != nil {
+	if err := input.DB.WithContext(ctx).Exec(query).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed to execute commit query")
 	}
 
@@ -1648,8 +1648,8 @@ func recreateTable(t *testing.T, ctx context.Context, client *bigquery.Client, d
 	// Try to create the table
 	err = table.Create(ctx, meta)
 	if err != nil {
-		// If table already exists, truncate it using TruncateExistTable
-		err = bqtarget.TruncateExistTable(ctx, err, client, dataset.DatasetID, config.Name)
+		// If table already exists, truncate it using TruncateTableIfExists
+		err = bqtarget.TruncateTableIfExists(ctx, err, client, dataset.DatasetID, config.Name)
 		require.NoError(t, err, "Failed to create or truncate table %s", config.Name)
 		t.Logf("Truncated existing table: %s", config.Name)
 	} else {

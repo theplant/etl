@@ -131,10 +131,10 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 	spanKVs["staging_table"] = input.StagingTable
 
 	createSQL := fmt.Sprintf(`
-			CREATE %s TABLE IF NOT EXISTS %s 
-			(LIKE %s INCLUDING ALL);
+			CREATE %s TABLE IF NOT EXISTS "%s" 
+			(LIKE "%s" INCLUDING ALL);
 			
-			TRUNCATE TABLE %s;
+			TRUNCATE TABLE "%s";
 			`,
 		tableType, input.StagingTable, input.TargetTable, input.StagingTable)
 
@@ -264,7 +264,7 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 	// Drop staging tables in reverse order (reverse dependency order)
 	for i := len(t.Datas) - 1; i >= 0; i-- {
 		stagingTable := t.stagingTables[t.Datas[i].Table]
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable)
+		dropSQL := fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, stagingTable)
 		if err := t.DB.WithContext(ctx).Exec(dropSQL).Error; err != nil {
 			spanKVs[fmt.Sprintf("drop_failed_staging_table_%s", stagingTable)] = stagingTable
 			return errors.Wrapf(err, "failed to cleanup staging table %s", stagingTable)

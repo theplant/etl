@@ -106,54 +106,57 @@ func (t *Target[T]) WithCreateStagingTableHook(hooks ...hook.Hook[CreateStagingT
 	return t
 }
 
-// TruncateExistTable truncates a table if it already exists, or returns the original error if it's not an "Already Exists" error
-func TruncateExistTable(ctx context.Context, err error, client *bigquery.Client, datasetID, tableName string) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.TruncateExistTable")
+// IsAlreadyExistsError checks if the error is a BigQuery "Already Exists" error (409 Conflict)
+func IsAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *googleapi.Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Code == http.StatusConflict
+}
+
+// TruncateTableIfExists truncates a table if the error indicates it already exists
+// Returns nil if table was truncated successfully, or the original error if it's not an "Already Exists" error
+func TruncateTableIfExists(ctx context.Context, err error, client *bigquery.Client, datasetID, tableName string) error {
+	if !IsAlreadyExistsError(err) {
+		return err
+	}
+	return truncateTable(ctx, client, datasetID, tableName)
+}
+
+func truncateTable(ctx context.Context, client *bigquery.Client, datasetID, tableName string) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.truncateTable")
 	spanKVs := make(map[string]any)
 	defer func() {
 		logtracing.AppendSpanKVs(ctx, spanKVs)
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
-	if err == nil {
-		return nil
-	}
-
 	projectID := client.Project()
 	spanKVs["project_id"] = projectID
 	spanKVs["dataset_id"] = datasetID
 	spanKVs["table_name"] = tableName
 
-	var apiErr *googleapi.Error
-	if !errors.As(err, &apiErr) {
-		// Error is not a googleapi.Error, return it as-is
-		return errors.Wrapf(err, "error is not 'Already Exists' for table %s", tableName)
+	truncateQuery := fmt.Sprintf("TRUNCATE TABLE `%s.%s.%s`", projectID, datasetID, tableName)
+	q := client.Query(truncateQuery)
+	job, err := q.Run(ctx)
+	if err != nil {
+		return errors.Wrapf(err, "failed to run truncate query for table %s", tableName)
 	}
 
-	alreadyExists := apiErr.Code == http.StatusConflict
-
-	if alreadyExists {
-		truncateQuery := fmt.Sprintf(`TRUNCATE TABLE %s.%s.%s`, projectID, datasetID, tableName)
-		q := client.Query(truncateQuery)
-		job, err := q.Run(ctx)
-		if err != nil {
-			return errors.Wrapf(err, "failed to truncate table %s: job run failed", tableName)
-		}
-
-		st, err := job.Wait(ctx)
-		if err != nil {
-			return errors.Wrapf(err, "failed to truncate table %s: job wait failed", tableName)
-		}
-
-		if st.Err() != nil {
-			return errors.Wrapf(st.Err(), "failed to truncate table %s: job status failed", tableName)
-		}
-		// Successfully truncated, return nil
-		return nil
+	st, err := job.Wait(ctx)
+	if err != nil {
+		return errors.Wrapf(err, "failed to wait for truncate job for table %s", tableName)
 	}
 
-	// Error is not "Already Exists", return the original error with context
-	return errors.Wrapf(err, "error is not 'Already Exists' for table %s", tableName)
+	if st.Err() != nil {
+		return errors.Wrapf(st.Err(), "truncate job failed for table %s", tableName)
+	}
+
+	return nil
 }
 
 func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (output *CreateStagingTableOutput, xerr error) {
@@ -183,40 +186,39 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 	spanKVs["target_table"] = input.TargetTable
 	spanKVs["staging_table"] = input.StagingTable
 
+	defer func() {
+		if xerr != nil && IsAlreadyExistsError(xerr) {
+			if err := truncateTable(ctx, client, datasetID, input.StagingTable); err != nil {
+				xerr = errors.Wrapf(err, "failed to truncate existing staging table %s", input.StagingTable)
+			} else {
+				output = &CreateStagingTableOutput{StagingTable: input.StagingTable}
+				xerr = nil
+			}
+		}
+	}()
+
 	// Create staging table using CREATE TABLE LIKE
 	// BigQuery supports CREATE TABLE LIKE which copies schema, partitioning, clustering, and options
 	// We don't use TEMP TABLE because for BigQuery, session management is not convenient
 	// Add expiration_timestamp option to automatically clean up staging tables
-	createQuery := fmt.Sprintf(`CREATE TABLE %s.%s.%s LIKE %s.%s.%s`,
-		projectID, datasetID, input.StagingTable,
-		projectID, datasetID, input.TargetTable)
+	createQuery := fmt.Sprintf("CREATE TABLE `%s.%s.%s` LIKE `%s.%s.%s`",
+		projectID, datasetID, input.StagingTable, projectID, datasetID, input.TargetTable)
 
-	createQuery += fmt.Sprintf(` OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL %d SECOND))`,
-		int(input.Target.StagingTableTTL.Seconds()))
+	createQuery += fmt.Sprintf(" OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL %d SECOND))", int(input.Target.StagingTableTTL.Seconds()))
 
 	q := client.Query(createQuery)
 	job, err := q.Run(ctx)
 	if err != nil {
-		if err := TruncateExistTable(ctx, err, client, datasetID, input.StagingTable); err != nil {
-			return nil, err
-		}
-		return &CreateStagingTableOutput{StagingTable: input.StagingTable}, nil
+		return nil, errors.Wrapf(err, "failed to run create staging table query for %s", input.StagingTable)
 	}
 
-	// Wait for job to complete
 	st, err := job.Wait(ctx)
 	if err != nil {
-		if err := TruncateExistTable(ctx, err, client, datasetID, input.StagingTable); err != nil {
-			return nil, err
-		}
-		return &CreateStagingTableOutput{StagingTable: input.StagingTable}, nil
+		return nil, errors.Wrapf(err, "failed to wait for create staging table job for %s", input.StagingTable)
 	}
 
-	// Check job status error
 	if st.Err() != nil {
-		if err := TruncateExistTable(ctx, st.Err(), client, datasetID, input.StagingTable); err != nil {
-			return nil, err
-		}
+		return nil, errors.Wrapf(st.Err(), "failed to create staging table %s", input.StagingTable)
 	}
 
 	return &CreateStagingTableOutput{StagingTable: input.StagingTable}, nil
