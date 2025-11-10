@@ -12,6 +12,7 @@ import (
 	"cloud.google.com/go/bigquery"
 	"github.com/pkg/errors"
 	"github.com/qor5/x/v3/hook"
+	"github.com/theplant/appkit/logtracing"
 	"github.com/theplant/etl"
 	"google.golang.org/api/googleapi"
 )
@@ -106,10 +107,23 @@ func (t *Target[T]) WithCreateStagingTableHook(hooks ...hook.Hook[CreateStagingT
 }
 
 // TruncateExistTable truncates a table if it already exists, or returns the original error if it's not an "Already Exists" error
-func TruncateExistTable(ctx context.Context, err error, client *bigquery.Client, datasetID, tableName string) error {
+func TruncateExistTable(ctx context.Context, err error, client *bigquery.Client, datasetID, tableName string) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.TruncateExistTable")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	if err == nil {
 		return nil
 	}
+
+	projectID := client.Project()
+	spanKVs["project_id"] = projectID
+	spanKVs["dataset_id"] = datasetID
+	spanKVs["table_name"] = tableName
+
 	var apiErr *googleapi.Error
 	if !errors.As(err, &apiErr) {
 		// Error is not a googleapi.Error, return it as-is
@@ -119,7 +133,7 @@ func TruncateExistTable(ctx context.Context, err error, client *bigquery.Client,
 	alreadyExists := apiErr.Code == http.StatusConflict
 
 	if alreadyExists {
-		truncateQuery := fmt.Sprintf(`TRUNCATE TABLE %s.%s.%s`, client.Project(), datasetID, tableName)
+		truncateQuery := fmt.Sprintf(`TRUNCATE TABLE %s.%s.%s`, projectID, datasetID, tableName)
 		q := client.Query(truncateQuery)
 		job, err := q.Run(ctx)
 		if err != nil {
@@ -142,7 +156,14 @@ func TruncateExistTable(ctx context.Context, err error, client *bigquery.Client,
 	return errors.Wrapf(err, "error is not 'Already Exists' for table %s", tableName)
 }
 
-func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (*CreateStagingTableOutput, error) {
+func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (output *CreateStagingTableOutput, xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.createStagingTable")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	// Validate staging table name
 	if err := validateTableName(input.StagingTable); err != nil {
 		return nil, errors.Wrapf(err, "invalid staging table name: %s", input.StagingTable)
@@ -156,6 +177,11 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 	client := input.Target.Config.Client
 	projectID := client.Project()
 	datasetID := input.Target.Config.DatasetID
+
+	spanKVs["project_id"] = projectID
+	spanKVs["dataset_id"] = datasetID
+	spanKVs["target_table"] = input.TargetTable
+	spanKVs["staging_table"] = input.StagingTable
 
 	// Create staging table using CREATE TABLE LIKE
 	// BigQuery supports CREATE TABLE LIKE which copies schema, partitioning, clustering, and options
@@ -197,7 +223,14 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 }
 
 // Load processes and writes the data to BigQuery target system
-func (t *Target[T]) Load(ctx context.Context) error {
+func (t *Target[T]) Load(ctx context.Context) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.Load")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	if len(t.Config.Datas) == 0 {
 		return nil // Nothing to write
 	}
@@ -238,6 +271,8 @@ func (t *Target[T]) Load(ctx context.Context) error {
 			continue
 		}
 
+		spanKVs[fmt.Sprintf("%s_%s_record_count", data.Table, stagingTableName)] = recordCount
+
 		// Convert records to []any for BigQuery Inserter
 		recordSlice := make([]any, recordCount)
 		for i := 0; i < recordCount; i++ {
@@ -266,7 +301,14 @@ func (t *Target[T]) Load(ctx context.Context) error {
 }
 
 // Cleanup cleans up staging tables (only called on successful completion)
-func (t *Target[T]) Cleanup(ctx context.Context) error {
+func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.Cleanup")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	// Drop staging tables in reverse order (reverse dependency order)
 	for i := len(t.Config.Datas) - 1; i >= 0; i-- {
 		stagingTableName := t.StagingTables[t.Config.Datas[i].Table]
@@ -280,6 +322,7 @@ func (t *Target[T]) Cleanup(ctx context.Context) error {
 				// Table doesn't exist, which is fine - continue cleanup
 				continue
 			}
+			spanKVs[fmt.Sprintf("delete_failed_staging_table_%s", stagingTableName)] = stagingTableName
 			return errors.Wrapf(err, "failed to cleanup staging table %s", stagingTableName)
 		}
 	}

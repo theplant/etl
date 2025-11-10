@@ -10,6 +10,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/qor5/x/v3/hook"
+	"github.com/theplant/appkit/logtracing"
 	"github.com/theplant/etl"
 	"gorm.io/gorm"
 )
@@ -98,7 +99,14 @@ func (t *Target[T]) WithCreateStagingTableHook(hooks ...hook.Hook[CreateStagingT
 	return t
 }
 
-func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (*CreateStagingTableOutput, error) {
+func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (output *CreateStagingTableOutput, xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.createStagingTable")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	// Validate staging table name
 	if err := validateTableName(input.StagingTable); err != nil {
 		return nil, errors.Wrapf(err, "invalid staging table name: %s", input.StagingTable)
@@ -119,6 +127,9 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 		tableType = "TEMP"
 	}
 
+	spanKVs["target_table"] = input.TargetTable
+	spanKVs["staging_table"] = input.StagingTable
+
 	createSQL := fmt.Sprintf(`
 			CREATE %s TABLE IF NOT EXISTS %s 
 			(LIKE %s INCLUDING ALL);
@@ -135,7 +146,14 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 }
 
 // Load processes and writes the data to PostgreSQL target system
-func (t *Target[T]) Load(ctx context.Context) error {
+func (t *Target[T]) Load(ctx context.Context) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.Load")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	if len(t.Config.Datas) == 0 {
 		return nil // Nothing to write
 	}
@@ -196,6 +214,8 @@ func (t *Target[T]) Load(ctx context.Context) error {
 			continue
 		}
 
+		spanKVs[fmt.Sprintf("%s_%s_record_count", data.Table, stagingTable)] = recordCount
+
 		// Insert records into staging table
 		if err := db.Table(stagingTable).Create(data.Records).Error; err != nil {
 			return errors.Wrapf(err, "failed to insert into staging table %s", stagingTable)
@@ -221,6 +241,9 @@ func (t *Target[T]) Load(ctx context.Context) error {
 			return err
 		}
 		if !currentStartedAt.Equal(initialStartedAt) {
+			spanKVs["database_restart_detected"] = true
+			spanKVs["initial_db_started_at"] = initialStartedAt.Format(time.RFC3339)
+			spanKVs["current_db_started_at"] = currentStartedAt.Format(time.RFC3339)
 			return errors.Errorf("database restarted during Load process (started at changed from %v to %v)",
 				initialStartedAt, currentStartedAt)
 		}
@@ -230,15 +253,22 @@ func (t *Target[T]) Load(ctx context.Context) error {
 }
 
 // Cleanup cleans up staging tables (only called on successful completion)
-func (t *Target[T]) Cleanup(ctx context.Context) error {
+func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.Cleanup")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	// Drop staging tables in reverse order (reverse dependency order)
 	for i := len(t.Config.Datas) - 1; i >= 0; i-- {
 		stagingTable := t.StagingTables[t.Config.Datas[i].Table]
 		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable)
 		if err := t.Config.DB.WithContext(ctx).Exec(dropSQL).Error; err != nil {
+			spanKVs[fmt.Sprintf("drop_failed_staging_table_%s", stagingTable)] = stagingTable
 			return errors.Wrapf(err, "failed to cleanup staging table %s", stagingTable)
 		}
-
 	}
 
 	// Clear the staging tables map after cleanup
@@ -247,8 +277,12 @@ func (t *Target[T]) Cleanup(ctx context.Context) error {
 }
 
 // getDBStartedAt returns the PostgreSQL database start time
-func (t *Target[T]) getDBStartedAt(ctx context.Context) (time.Time, error) {
-	var startedAt time.Time
+func (t *Target[T]) getDBStartedAt(ctx context.Context) (startedAt time.Time, xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.getDBStartedAt")
+	defer func() {
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	if err := t.Config.DB.WithContext(ctx).Raw("SELECT pg_postmaster_start_time()").Scan(&startedAt).Error; err != nil {
 		return time.Time{}, errors.Wrap(err, "failed to query database start time")
 	}
