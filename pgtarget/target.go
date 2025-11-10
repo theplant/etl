@@ -54,42 +54,42 @@ type Config[T any] struct {
 
 // Target implements the Target interface for PostgreSQL
 type Target[T any] struct {
-	Config                 *Config[T]
-	StagingTables          map[string]string // Track staging tables for cleanup
+	*Config[T]
+	stagingTables          map[string]string // Track staging tables for cleanup
 	createStagingTableHook hook.Hook[CreateStagingTableFunc[T]]
 }
 
 var _ etl.Target = (*Target[any])(nil)
 
 // New creates a new PostgreSQL target with the given configuration
-func New[T any](cfg *Config[T]) (*Target[T], error) {
-	if cfg == nil {
+func New[T any](conf *Config[T]) (*Target[T], error) {
+	if conf == nil {
 		return nil, errors.New("config is required")
 	}
 
-	if cfg.DB == nil {
+	if conf.DB == nil {
 		return nil, errors.New("db is required")
 	}
 
-	if cfg.DB.PrepareStmt {
+	if conf.DB.PrepareStmt {
 		return nil, errors.New("PrepareStmt is not supported: it conflicts with multi-statement SQL execution which is commonly used in ETL operations")
 	}
 
-	if cfg.Req == nil {
+	if conf.Req == nil {
 		return nil, errors.New("req is required")
 	}
 
-	if err := cfg.Datas.Validate(); err != nil {
+	if err := conf.Datas.Validate(); err != nil {
 		return nil, err
 	}
 
-	if cfg.CommitFunc == nil {
+	if conf.CommitFunc == nil {
 		return nil, errors.New("commitFunc is required")
 	}
 
 	return &Target[T]{
-		Config:        cfg,
-		StagingTables: make(map[string]string),
+		Config:        conf,
+		stagingTables: make(map[string]string),
 	}, nil
 }
 
@@ -121,7 +121,7 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 	// TEMP TABLE is preferred for easier database permission management
 	// UNLOGGED TABLE is better for traceability but requires checking database restart time to detect silent failures
 	var tableType string
-	if input.Target.Config.UseUnloggedTable {
+	if input.Target.UseUnloggedTable {
 		tableType = "UNLOGGED"
 	} else {
 		tableType = "TEMP"
@@ -154,18 +154,18 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
-	if len(t.Config.Datas) == 0 {
+	if len(t.Datas) == 0 {
 		return nil // Nothing to write
 	}
 
-	db := t.Config.DB.WithContext(ctx)
+	db := t.DB.WithContext(ctx)
 
 	// Record database start time at the beginning of Load (only needed for UNLOGGED tables)
 	// This will be verified at the end to detect database restarts during the Load process
 	// Database restart is the only silent failure scenario for UNLOGGED tables
 	// TEMP TABLE doesn't need this check because it's automatically cleaned up on session end
 	var initialStartedAt time.Time
-	if t.Config.UseUnloggedTable {
+	if t.UseUnloggedTable {
 		var err error
 		initialStartedAt, err = t.getDBStartedAt(ctx)
 		if err != nil {
@@ -174,11 +174,11 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 	}
 
 	// Prepare: create or reuse staging tables in data order
-	stagingSuffix := strings.ToLower(fmt.Sprintf("_stg_%s", t.Config.Req.String()))
+	stagingSuffix := strings.ToLower(fmt.Sprintf("_stg_%s", t.Req.String()))
 
-	t.StagingTables = make(map[string]string)
+	t.stagingTables = make(map[string]string)
 	if err := db.Transaction(func(tx *gorm.DB) error {
-		for _, data := range t.Config.Datas {
+		for _, data := range t.Datas {
 			createStagingTableFunc := createStagingTable[T]
 			if t.createStagingTableHook != nil {
 				createStagingTableFunc = t.createStagingTableHook(createStagingTableFunc)
@@ -194,7 +194,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 				return errors.Wrapf(err, "failed to create staging table for %s", data.Table)
 			}
 
-			t.StagingTables[data.Table] = output.StagingTable
+			t.stagingTables[data.Table] = output.StagingTable
 		}
 		return nil
 	}); err != nil {
@@ -202,8 +202,8 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 	}
 
 	// Write: insert data into staging tables
-	for _, data := range t.Config.Datas {
-		stagingTable := t.StagingTables[data.Table]
+	for _, data := range t.Datas {
+		stagingTable := t.stagingTables[data.Table]
 
 		if data.Records == nil {
 			continue
@@ -224,9 +224,9 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 
 	// Execute commit function (required)
 	// Note: commitFunc may modify staging table data (e.g., deduplication, incremental updates)
-	if _, err := t.Config.CommitFunc(ctx, &CommitInput[T]{
+	if _, err := t.CommitFunc(ctx, &CommitInput[T]{
 		Target:        t,
-		StagingTables: t.StagingTables,
+		StagingTables: t.stagingTables,
 	}); err != nil {
 		return errors.Wrap(err, "commit function failed")
 	}
@@ -235,7 +235,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 	// This is the only silent failure scenario for UNLOGGED tables
 	// All other failures (write errors, I/O errors, etc.) return explicit errors
 	// TEMP TABLE doesn't need this check because it's automatically cleaned up on session end
-	if t.Config.UseUnloggedTable {
+	if t.UseUnloggedTable {
 		currentStartedAt, err := t.getDBStartedAt(ctx)
 		if err != nil {
 			return err
@@ -262,17 +262,17 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 	}()
 
 	// Drop staging tables in reverse order (reverse dependency order)
-	for i := len(t.Config.Datas) - 1; i >= 0; i-- {
-		stagingTable := t.StagingTables[t.Config.Datas[i].Table]
+	for i := len(t.Datas) - 1; i >= 0; i-- {
+		stagingTable := t.stagingTables[t.Datas[i].Table]
 		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable)
-		if err := t.Config.DB.WithContext(ctx).Exec(dropSQL).Error; err != nil {
+		if err := t.DB.WithContext(ctx).Exec(dropSQL).Error; err != nil {
 			spanKVs[fmt.Sprintf("drop_failed_staging_table_%s", stagingTable)] = stagingTable
 			return errors.Wrapf(err, "failed to cleanup staging table %s", stagingTable)
 		}
 	}
 
 	// Clear the staging tables map after cleanup
-	t.StagingTables = make(map[string]string)
+	t.stagingTables = make(map[string]string)
 	return nil
 }
 
@@ -283,7 +283,7 @@ func (t *Target[T]) getDBStartedAt(ctx context.Context) (startedAt time.Time, xe
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
-	if err := t.Config.DB.WithContext(ctx).Raw("SELECT pg_postmaster_start_time()").Scan(&startedAt).Error; err != nil {
+	if err := t.DB.WithContext(ctx).Raw("SELECT pg_postmaster_start_time()").Scan(&startedAt).Error; err != nil {
 		return time.Time{}, errors.Wrap(err, "failed to query database start time")
 	}
 	return startedAt, nil

@@ -56,47 +56,47 @@ type Config[T any] struct {
 
 // Target implements the Target interface for BigQuery
 type Target[T any] struct {
-	Config                 *Config[T]
-	StagingTables          map[string]string // Track staging tables for cleanup
+	*Config[T]
+	stagingTables          map[string]string // Track staging tables for cleanup
 	createStagingTableHook hook.Hook[CreateStagingTableFunc[T]]
 }
 
 var _ etl.Target = (*Target[any])(nil)
 
 // New creates a new BigQuery target with the given configuration
-func New[T any](cfg *Config[T]) (*Target[T], error) {
-	if cfg == nil {
+func New[T any](conf *Config[T]) (*Target[T], error) {
+	if conf == nil {
 		return nil, errors.New("config is required")
 	}
 
-	if cfg.Client == nil {
+	if conf.Client == nil {
 		return nil, errors.New("client is required")
 	}
 
-	if err := validateDatasetID(cfg.DatasetID); err != nil {
-		return nil, errors.Wrapf(err, "invalid datasetID: %s", cfg.DatasetID)
+	if err := validateDatasetID(conf.DatasetID); err != nil {
+		return nil, errors.Wrapf(err, "invalid datasetID: %s", conf.DatasetID)
 	}
 
-	if cfg.Req == nil {
+	if conf.Req == nil {
 		return nil, errors.New("req is required")
 	}
 
-	if err := cfg.Datas.Validate(); err != nil {
+	if err := conf.Datas.Validate(); err != nil {
 		return nil, err
 	}
 
-	if cfg.CommitFunc == nil {
+	if conf.CommitFunc == nil {
 		return nil, errors.New("commitFunc is required")
 	}
 
 	// Set default TTL if not specified
-	if cfg.StagingTableTTL == 0 {
-		cfg.StagingTableTTL = 24 * time.Hour // Default TTL: 24 hours
+	if conf.StagingTableTTL == 0 {
+		conf.StagingTableTTL = 24 * time.Hour // Default TTL: 24 hours
 	}
 
 	return &Target[T]{
-		Config:        cfg,
-		StagingTables: make(map[string]string),
+		Config:        conf,
+		stagingTables: make(map[string]string),
 	}, nil
 }
 
@@ -174,9 +174,9 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 		return nil, errors.Wrapf(err, "invalid target table name: %s", input.TargetTable)
 	}
 
-	client := input.Target.Config.Client
+	client := input.Target.Client
 	projectID := client.Project()
-	datasetID := input.Target.Config.DatasetID
+	datasetID := input.Target.DatasetID
 
 	spanKVs["project_id"] = projectID
 	spanKVs["dataset_id"] = datasetID
@@ -192,7 +192,7 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 		projectID, datasetID, input.TargetTable)
 
 	createQuery += fmt.Sprintf(` OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL %d SECOND))`,
-		int(input.Target.Config.StagingTableTTL.Seconds()))
+		int(input.Target.StagingTableTTL.Seconds()))
 
 	q := client.Query(createQuery)
 	job, err := q.Run(ctx)
@@ -231,15 +231,15 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
-	if len(t.Config.Datas) == 0 {
+	if len(t.Datas) == 0 {
 		return nil // Nothing to write
 	}
 
 	// Prepare: create or reuse staging tables in data order
-	stagingSuffix := strings.ToLower(fmt.Sprintf("_stg_%s", t.Config.Req.String()))
+	stagingSuffix := strings.ToLower(fmt.Sprintf("_stg_%s", t.Req.String()))
 
-	t.StagingTables = make(map[string]string)
-	for _, data := range t.Config.Datas {
+	t.stagingTables = make(map[string]string)
+	for _, data := range t.Datas {
 		createStagingTableFunc := createStagingTable[T]
 		if t.createStagingTableHook != nil {
 			createStagingTableFunc = t.createStagingTableHook(createStagingTableFunc)
@@ -254,12 +254,12 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 			return errors.Wrapf(err, "failed to create staging table for %s", data.Table)
 		}
 
-		t.StagingTables[data.Table] = output.StagingTable
+		t.stagingTables[data.Table] = output.StagingTable
 	}
 
 	// Write: insert data into staging tables
-	for _, data := range t.Config.Datas {
-		stagingTableName := t.StagingTables[data.Table]
+	for _, data := range t.Datas {
+		stagingTableName := t.stagingTables[data.Table]
 
 		if data.Records == nil {
 			continue
@@ -280,7 +280,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 		}
 
 		// Use Inserter to insert data
-		inserter := t.Config.Client.Dataset(t.Config.DatasetID).Table(stagingTableName).Inserter()
+		inserter := t.Client.Dataset(t.DatasetID).Table(stagingTableName).Inserter()
 
 		// Put data
 		if err := inserter.Put(ctx, recordSlice); err != nil {
@@ -290,9 +290,9 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 
 	// Execute commit function (required)
 	// Note: commitFunc may modify staging table data (e.g., deduplication, incremental updates)
-	if _, err := t.Config.CommitFunc(ctx, &CommitInput[T]{
+	if _, err := t.CommitFunc(ctx, &CommitInput[T]{
 		Target:        t,
-		StagingTables: t.StagingTables,
+		StagingTables: t.stagingTables,
 	}); err != nil {
 		return errors.Wrap(err, "commit function failed")
 	}
@@ -310,12 +310,12 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 	}()
 
 	// Drop staging tables in reverse order (reverse dependency order)
-	for i := len(t.Config.Datas) - 1; i >= 0; i-- {
-		stagingTableName := t.StagingTables[t.Config.Datas[i].Table]
+	for i := len(t.Datas) - 1; i >= 0; i-- {
+		stagingTableName := t.stagingTables[t.Datas[i].Table]
 
 		// Delete staging table
 		// BigQuery doesn't support DROP TABLE IF EXISTS, so we try to delete and ignore not found errors
-		table := t.Config.Client.Dataset(t.Config.DatasetID).Table(stagingTableName)
+		table := t.Client.Dataset(t.DatasetID).Table(stagingTableName)
 		if err := table.Delete(ctx); err != nil {
 			// Check if error is "not found" - if so, table doesn't exist, which is fine
 			if IsNotFound(err) {
@@ -328,7 +328,7 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 	}
 
 	// Clear the staging tables map after cleanup
-	t.StagingTables = make(map[string]string)
+	t.stagingTables = make(map[string]string)
 	return nil
 }
 
@@ -345,52 +345,28 @@ func IsNotFound(err error) bool {
 	return apiErr.Code == http.StatusNotFound
 }
 
-// tableNameRegex validates that table name contains only letters, numbers, and underscores
-var tableNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+var identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
-// validateTableName validates that a table name contains only letters, numbers, and underscores
-// - Must be between 1 and 1024 UTF-8 bytes
-func validateTableName(name string) error {
+func validateIdentifier(name, identifierType string) error {
 	if len(name) == 0 {
-		return errors.New("table name cannot be empty")
+		return errors.Errorf("%s cannot be empty", identifierType)
 	}
 
-	// Check UTF-8 byte length (not character count)
-	// In Go, len(string) returns the byte length, not the character count
 	if len(name) > 1024 {
-		return errors.Errorf("table name exceeds maximum length of 1024 UTF-8 bytes: %d", len(name))
+		return errors.Errorf("%s exceeds maximum length of 1024 UTF-8 bytes: %d", identifierType, len(name))
 	}
 
-	// Check that all characters are letters, numbers, or underscores using regex
-	if !tableNameRegex.MatchString(name) {
-		return errors.Errorf("table name contains invalid characters: %s (only letters, numbers, and underscores are allowed)", name)
+	if !identifierRegex.MatchString(name) {
+		return errors.Errorf("%s contains invalid characters: %s (only letters, numbers, and underscores are allowed)", identifierType, name)
 	}
 
 	return nil
 }
 
-// datasetIDRegex validates that dataset ID contains only letters, numbers, and underscores
-var datasetIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+func validateTableName(name string) error {
+	return validateIdentifier(name, "table name")
+}
 
-// validateDatasetID validates that a dataset ID contains only letters, numbers, and underscores
-// - Must be between 1 and 1024 UTF-8 bytes
-// BigQuery dataset ID follows the same rules as table names: letters, numbers, and underscores only
 func validateDatasetID(datasetID string) error {
-	if len(datasetID) == 0 {
-		return errors.New("dataset ID cannot be empty")
-	}
-
-	// Check UTF-8 byte length (not character count)
-	// In Go, len(string) returns the byte length, not the character count
-	if len(datasetID) > 1024 {
-		return errors.Errorf("dataset ID exceeds maximum length of 1024 UTF-8 bytes: %d", len(datasetID))
-	}
-
-	// Check that all characters are letters, numbers, or underscores using regex
-	// BigQuery dataset ID follows the same rules as table names
-	if !datasetIDRegex.MatchString(datasetID) {
-		return errors.Errorf("dataset ID contains invalid characters: %s (only letters, numbers, and underscores are allowed)", datasetID)
-	}
-
-	return nil
+	return validateIdentifier(datasetID, "dataset ID")
 }
