@@ -204,7 +204,7 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 	createQuery := fmt.Sprintf("CREATE TABLE `%s.%s.%s` LIKE `%s.%s.%s`",
 		projectID, datasetID, input.StagingTable, projectID, datasetID, input.TargetTable)
 
-	createQuery += fmt.Sprintf(" OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL @ttl_seconds SECOND))")
+	createQuery += " OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL @ttl_seconds SECOND))"
 
 	q := client.Query(createQuery)
 	q.Parameters = []bigquery.QueryParameter{
