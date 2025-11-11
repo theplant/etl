@@ -108,7 +108,7 @@ func NewPipeline[T any](conf *PipelineConfig[T]) (*Pipeline[T], error) {
 
 	return &Pipeline[T]{
 		PipelineConfig: conf,
-		queue:          queue,
+		queue:          goquex.WithTracing(queue),
 	}, nil
 }
 
@@ -234,9 +234,18 @@ type ProcessResult[T any] struct {
 }
 
 // Process performs the actual ETL processing logic
-func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) error {
+func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "etl.Process")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
+	spanKVs["process_job_id"] = job.ID()
+
 	if s.isCircuitBreakerOpen() {
-		logtracing.AppendSpanKVs(ctx, "circuit_breaker_open", true)
+		spanKVs["circuit_breaker_open"] = true
 		return s.handleCircuitBreakerOpen(ctx, job)
 	}
 
@@ -254,7 +263,24 @@ func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) error {
 }
 
 // doProcess performs the core ETL processing logic for a single page
-func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) *ProcessResult[T] {
+func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) (result *ProcessResult[T]) {
+	ctx, _ = logtracing.StartSpan(ctx, "etl.doProcess")
+	spanKVs := make(map[string]any)
+	defer func() {
+		if result != nil {
+			spanKVs["result.new_cursor"] = fmt.Sprintf("%v", result.NewCursor)
+			spanKVs["result.has_next_page"] = result.HasNextPage
+			spanKVs["result.error"] = fmt.Sprintf("%+v", result.Error)
+		}
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, nil)
+	}()
+
+	spanKVs["req.after_cursor"] = fmt.Sprintf("%v", req.After)
+	spanKVs["req.first"] = req.First
+	spanKVs["req.from_at"] = req.FromAt.Format(time.RFC3339)
+	spanKVs["req.before_at"] = req.BeforeAt.Format(time.RFC3339)
+
 	resp, err := s.Source.Extract(ctx, req)
 	if err != nil {
 		return &ProcessResult[T]{
@@ -263,6 +289,10 @@ func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) *Pr
 			Error:       errors.Wrap(err, "failed to extract"),
 		}
 	}
+
+	spanKVs["resp.target_is_nil"] = resp.Target == nil
+	spanKVs["resp.end_cursor"] = fmt.Sprintf("%v", resp.EndCursor)
+	spanKVs["resp.has_next_page"] = resp.HasNextPage
 
 	if resp.Target == nil {
 		return &ProcessResult[T]{
@@ -280,7 +310,7 @@ func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) *Pr
 	}
 
 	// Create result with extract information
-	result := &ProcessResult[T]{
+	result = &ProcessResult[T]{
 		NewCursor:   resp.EndCursor,
 		HasNextPage: resp.HasNextPage,
 	}
@@ -293,10 +323,8 @@ func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) *Pr
 
 	// Only cleanup on successful write to allow error debugging
 	if err := resp.Target.Cleanup(ctx); err != nil {
-		logtracing.AppendSpanKVs(ctx, "etl.cleanup_error", err.Error())
 		if s.Notifier != nil {
-			// TODO: Pass current span key-values to notifier
-			s.Notifier.Notify(errors.Wrap(err, "failed to cleanup"), nil, map[string]any{})
+			s.Notifier.Notify(errors.Wrap(err, "failed to cleanup"), nil, spanKVs)
 		}
 	}
 
@@ -313,7 +341,16 @@ func (s *Pipeline[T]) calculateCooldownRunAt() time.Time {
 }
 
 // handleCircuitBreakerOpen handles the case when circuit breaker is open
-func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job) error {
+func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "etl.handleCircuitBreakerOpen")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
+	spanKVs["cooldown_duration"] = s.CircuitBreakerCooldown.String()
+
 	var req ExtractRequest[T]
 	if _, err := que.ParseArgs(job.Plan().Args, &req); err != nil {
 		return errors.Wrap(err, "failed to parse request for circuit breaker handling")
@@ -330,24 +367,30 @@ func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job)
 
 		// Enqueue the same job to run after cooldown
 		nextRunAt := s.calculateCooldownRunAt()
+		spanKVs["next_run_at"] = nextRunAt.Format(time.RFC3339)
 		if err := s.enqueueJob(ctx, tx, &req, nextRunAt); err != nil {
 			return errors.Wrap(err, "failed to enqueue cooldown job")
 		}
-
-		logtracing.AppendSpanKVs(ctx,
-			"cooldown_duration", s.CircuitBreakerCooldown.String(),
-			"next_run_at", nextRunAt.Format(time.RFC3339),
-		)
 
 		return nil
 	})
 }
 
 // handleFailure handles job failure with appropriate retry/skip logic
-func (s *Pipeline[T]) handleFailure(ctx context.Context, job que.Job, req *ExtractRequest[T], result *ProcessResult[T]) error {
-	_, hasMoreRetries := job.Plan().RetryPolicy.NextInterval(job.RetryCount())
+func (s *Pipeline[T]) handleFailure(ctx context.Context, job que.Job, req *ExtractRequest[T], result *ProcessResult[T]) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "etl.handleFailure")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
+	nextInterval, hasMoreRetries := job.Plan().RetryPolicy.NextInterval(job.RetryCount())
 
 	if hasMoreRetries {
+		spanKVs["has_more_retries"] = true
+		spanKVs["job_retry_count"] = job.RetryCount()
+		spanKVs["next_retry_interval_seconds"] = nextInterval.Seconds()
 		// Let goque handle the retry naturally
 		return result.Error
 	}
@@ -380,22 +423,16 @@ func (s *Pipeline[T]) handleFailure(ctx context.Context, job que.Job, req *Extra
 			return errors.Wrap(err, "failed to enqueue next job after failure")
 		}
 
-		// Log failure information for observability
-		logtracing.AppendSpanKVs(ctx,
-			"job_skipped", true,
-			"process_error", fmt.Sprintf("%+v", result.Error),
-			"has_next_page", result.HasNextPage,
-			"circuit_breaker_opened", circuitBreakerOpened,
-			"skipped_count", s.skippedCount.Load(),
-		)
+		// Log failure information for observability (only after successful enqueue)
+		spanKVs["job_skipped"] = true
+		spanKVs["process_error"] = fmt.Sprintf("%+v", result.Error)
+		spanKVs["has_next_page"] = result.HasNextPage
+		spanKVs["circuit_breaker_opened"] = circuitBreakerOpened
+		spanKVs["skipped_count"] = s.skippedCount.Load()
 
 		// Notify about circuit breaker if it just opened
 		if circuitBreakerOpened && s.Notifier != nil {
-			// TODO: Pass current span key-values to notifier
-			s.Notifier.Notify(errors.New("pipeline circuit breaker opened"), nil, map[string]any{
-				"circuit_breaker_opened": true,
-				"skipped_count":          s.skippedCount.Load(),
-			})
+			s.Notifier.Notify(errors.New("pipeline circuit breaker opened"), nil, spanKVs)
 		}
 
 		return nil
@@ -403,14 +440,21 @@ func (s *Pipeline[T]) handleFailure(ctx context.Context, job que.Job, req *Extra
 }
 
 // handleSuccess handles completion of a successful job
-func (s *Pipeline[T]) handleSuccess(ctx context.Context, job que.Job, req *ExtractRequest[T], result *ProcessResult[T]) error {
+func (s *Pipeline[T]) handleSuccess(ctx context.Context, job que.Job, req *ExtractRequest[T], result *ProcessResult[T]) (xerr error) {
+	ctx, _ = logtracing.StartSpan(ctx, "etl.handleSuccess")
+	spanKVs := make(map[string]any)
+	defer func() {
+		logtracing.AppendSpanKVs(ctx, spanKVs)
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
 	s.recordSuccess()
 	return sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {
 		job.In(tx)
 		defer job.In(nil)
 
 		// Mark current job as completed
-		if err := job.Done(ctx); err != nil {
+		if err := job.Destroy(ctx); err != nil {
 			return errors.Wrap(err, "failed to mark job as done")
 		}
 
@@ -425,10 +469,8 @@ func (s *Pipeline[T]) handleSuccess(ctx context.Context, job que.Job, req *Extra
 		}
 
 		// Log success information for observability
-		logtracing.AppendSpanKVs(ctx,
-			"job_completed", true,
-			"has_next_page", result.HasNextPage,
-		)
+		spanKVs["job_completed"] = true
+		spanKVs["has_next_page"] = result.HasNextPage
 
 		return nil
 	})
@@ -445,9 +487,8 @@ func (s *Pipeline[T]) createNextExtractRequest(req *ExtractRequest[T], result *P
 		}
 	}
 
-	var emptyCursor T
 	return &ExtractRequest[T]{
-		After:    emptyCursor,
+		After:    result.NewCursor,
 		First:    s.PageSize,
 		FromAt:   req.BeforeAt, // next interval
 		BeforeAt: time.Time{},
