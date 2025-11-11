@@ -235,10 +235,12 @@ type ProcessResult[T any] struct {
 
 // Process performs the actual ETL processing logic
 func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "etl.Process")
+	ctx, span := logtracing.StartSpan(ctx, "etl.Process")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -264,7 +266,7 @@ func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) (xerr error) {
 
 // doProcess performs the core ETL processing logic for a single page
 func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) (result *ProcessResult[T]) {
-	ctx, _ = logtracing.StartSpan(ctx, "etl.doProcess")
+	ctx, span := logtracing.StartSpan(ctx, "etl.doProcess")
 	spanKVs := make(map[string]any)
 	defer func() {
 		if result != nil {
@@ -272,7 +274,9 @@ func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) (re
 			spanKVs["result.has_next_page"] = result.HasNextPage
 			spanKVs["result.error"] = fmt.Sprintf("%+v", result.Error)
 		}
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, nil)
 	}()
 
@@ -342,10 +346,12 @@ func (s *Pipeline[T]) calculateCooldownRunAt() time.Time {
 
 // handleCircuitBreakerOpen handles the case when circuit breaker is open
 func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "etl.handleCircuitBreakerOpen")
+	ctx, span := logtracing.StartSpan(ctx, "etl.handleCircuitBreakerOpen")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -378,10 +384,12 @@ func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job)
 
 // handleFailure handles job failure with appropriate retry/skip logic
 func (s *Pipeline[T]) handleFailure(ctx context.Context, job que.Job, req *ExtractRequest[T], result *ProcessResult[T]) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "etl.handleFailure")
+	ctx, span := logtracing.StartSpan(ctx, "etl.handleFailure")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -441,10 +449,12 @@ func (s *Pipeline[T]) handleFailure(ctx context.Context, job que.Job, req *Extra
 
 // handleSuccess handles completion of a successful job
 func (s *Pipeline[T]) handleSuccess(ctx context.Context, job que.Job, req *ExtractRequest[T], result *ProcessResult[T]) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "etl.handleSuccess")
+	ctx, span := logtracing.StartSpan(ctx, "etl.handleSuccess")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 

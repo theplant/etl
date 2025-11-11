@@ -100,10 +100,12 @@ func (t *Target[T]) WithCreateStagingTableHook(hooks ...hook.Hook[CreateStagingT
 }
 
 func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (output *CreateStagingTableOutput, xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.createStagingTable")
+	ctx, span := logtracing.StartSpan(ctx, "pgtarget.createStagingTable")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -147,10 +149,12 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 
 // Load processes and writes the data to PostgreSQL target system
 func (t *Target[T]) Load(ctx context.Context) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.Load")
+	ctx, span := logtracing.StartSpan(ctx, "pgtarget.Load")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -254,10 +258,12 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 
 // Cleanup cleans up staging tables (only called on successful completion)
 func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.Cleanup")
+	ctx, span := logtracing.StartSpan(ctx, "pgtarget.Cleanup")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
