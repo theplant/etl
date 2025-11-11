@@ -128,10 +128,12 @@ func TruncateTableIfExists(ctx context.Context, err error, client *bigquery.Clie
 }
 
 func truncateTable(ctx context.Context, client *bigquery.Client, datasetID, tableName string) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.truncateTable")
+	ctx, span := logtracing.StartSpan(ctx, "bqtarget.truncateTable")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -160,10 +162,12 @@ func truncateTable(ctx context.Context, client *bigquery.Client, datasetID, tabl
 }
 
 func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInput[T]) (output *CreateStagingTableOutput, xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.createStagingTable")
+	ctx, span := logtracing.StartSpan(ctx, "bqtarget.createStagingTable")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -232,10 +236,12 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 
 // Load processes and writes the data to BigQuery target system
 func (t *Target[T]) Load(ctx context.Context) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.Load")
+	ctx, span := logtracing.StartSpan(ctx, "bqtarget.Load")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
@@ -310,10 +316,12 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 
 // Cleanup cleans up staging tables (only called on successful completion)
 func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
-	ctx, _ = logtracing.StartSpan(ctx, "bqtarget.Cleanup")
+	ctx, span := logtracing.StartSpan(ctx, "bqtarget.Cleanup")
 	spanKVs := make(map[string]any)
 	defer func() {
-		logtracing.AppendSpanKVs(ctx, spanKVs)
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
