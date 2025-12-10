@@ -181,9 +181,9 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 		return nil, errors.Wrapf(err, "invalid target table name: %s", input.TargetTable)
 	}
 
-	client := input.Target.Client
+	client := input.Client
 	projectID := client.Project()
-	datasetID := input.Target.DatasetID
+	datasetID := input.DatasetID
 
 	spanKVs["project_id"] = projectID
 	spanKVs["dataset_id"] = datasetID
@@ -214,7 +214,7 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 	q.Parameters = []bigquery.QueryParameter{
 		{
 			Name:  "ttl_seconds",
-			Value: int64(input.Target.StagingTableTTL.Seconds()),
+			Value: int64(input.StagingTableTTL.Seconds()),
 		},
 	}
 	job, err := q.Run(ctx)
@@ -271,6 +271,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 		t.stagingTables[data.Table] = output.StagingTable
 	}
 
+	var tableRecordCounts []etl.TableRecordCount
 	// Write: insert data into staging tables
 	for _, data := range t.Datas {
 		stagingTableName := t.stagingTables[data.Table]
@@ -285,7 +286,11 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 			continue
 		}
 
-		spanKVs[fmt.Sprintf("%s_%s_record_count", data.Table, stagingTableName)] = recordCount
+		tableRecordCounts = append(tableRecordCounts, etl.TableRecordCount{
+			Table:        data.Table,
+			StagingTable: stagingTableName,
+			RecordCount:  recordCount,
+		})
 
 		// Convert records to []any for BigQuery Inserter
 		recordSlice := make([]any, recordCount)
@@ -300,6 +305,10 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 		if err := inserter.Put(ctx, recordSlice); err != nil {
 			return errors.Wrapf(err, "failed to insert into staging table %s", stagingTableName)
 		}
+	}
+
+	if s := etl.MarshalTableRecordCounts(tableRecordCounts); s != "" {
+		spanKVs["table_record_counts"] = s
 	}
 
 	// Execute commit function (required)
@@ -338,7 +347,7 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 				// Table doesn't exist, which is fine - continue cleanup
 				continue
 			}
-			spanKVs[fmt.Sprintf("delete_failed_staging_table_%s", stagingTableName)] = stagingTableName
+			spanKVs["cleanup_failed_staging_table"] = stagingTableName
 			return errors.Wrapf(err, "failed to cleanup staging table %s", stagingTableName)
 		}
 	}

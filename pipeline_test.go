@@ -1030,9 +1030,9 @@ func (s *identityBQSyncer) transform(_ context.Context, users []*User) (etl.Targ
 }
 
 func (s *identityBQSyncer) commit(ctx context.Context, input *bqtarget.CommitInput[*etl.Cursor]) (*bqtarget.CommitOutput[*etl.Cursor], error) {
-	client := input.Config.Client
+	client := input.Client
 	projectID := client.Project()
-	datasetID := input.Config.DatasetID
+	datasetID := input.DatasetID
 
 	identitiesStagingTable := input.StagingTables["identities"]
 	credentialsStagingTable := input.StagingTables["credentials"]

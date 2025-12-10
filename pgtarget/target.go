@@ -123,7 +123,7 @@ func createStagingTable[T any](ctx context.Context, input *CreateStagingTableInp
 	// TEMP TABLE is preferred for easier database permission management
 	// UNLOGGED TABLE is better for traceability but requires checking database restart time to detect silent failures
 	var tableType string
-	if input.Target.UseUnloggedTable {
+	if input.UseUnloggedTable {
 		tableType = "UNLOGGED"
 	} else {
 		tableType = "TEMP"
@@ -204,7 +204,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 	}); err != nil {
 		return errors.Wrap(err, "failed to create staging tables")
 	}
-
+	var tableRecordCounts []etl.TableRecordCount
 	// Write: insert data into staging tables
 	for _, data := range t.Datas {
 		stagingTable := t.stagingTables[data.Table]
@@ -218,12 +218,20 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 			continue
 		}
 
-		spanKVs[fmt.Sprintf("%s_%s_record_count", data.Table, stagingTable)] = recordCount
+		tableRecordCounts = append(tableRecordCounts, etl.TableRecordCount{
+			Table:        data.Table,
+			StagingTable: stagingTable,
+			RecordCount:  recordCount,
+		})
 
 		// Insert records into staging table
 		if err := db.Table(stagingTable).Create(data.Records).Error; err != nil {
 			return errors.Wrapf(err, "failed to insert into staging table %s", stagingTable)
 		}
+	}
+
+	if s := etl.MarshalTableRecordCounts(tableRecordCounts); s != "" {
+		spanKVs["table_record_counts"] = s
 	}
 
 	// Execute commit function (required)
@@ -272,7 +280,7 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 		stagingTable := t.stagingTables[t.Datas[i].Table]
 		dropSQL := fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, stagingTable)
 		if err := t.DB.WithContext(ctx).Exec(dropSQL).Error; err != nil {
-			spanKVs[fmt.Sprintf("drop_failed_staging_table_%s", stagingTable)] = stagingTable
+			spanKVs["cleanup_failed_staging_table"] = stagingTable
 			return errors.Wrapf(err, "failed to cleanup staging table %s", stagingTable)
 		}
 	}
