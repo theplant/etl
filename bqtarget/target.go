@@ -12,6 +12,7 @@ import (
 	"cloud.google.com/go/bigquery"
 	"github.com/pkg/errors"
 	"github.com/qor5/x/v3/hook"
+	"github.com/qor5/x/v3/jsonx"
 	"github.com/theplant/appkit/logtracing"
 	"github.com/theplant/etl"
 	"google.golang.org/api/googleapi"
@@ -307,9 +308,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 		}
 	}
 
-	if s := etl.MarshalTableRecordCounts(tableRecordCounts); s != "" {
-		spanKVs["table_record_counts"] = s
-	}
+	spanKVs["table_record_counts"] = jsonx.MustMarshalX[string](tableRecordCounts)
 
 	// Execute commit function (required)
 	// Note: commitFunc may modify staging table data (e.g., deduplication, incremental updates)
