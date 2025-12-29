@@ -767,17 +767,19 @@ func TestPipeline_BQTarget(t *testing.T) {
 	prepareSourceTestData(t, sourceDB)
 
 	// Setup BigQuery dataset and tables
-	client, dataset := setupBQTables(t, ctx, "product-data-sandbox", "etl_test")
+	projectID := "product-data-sandbox"
+	datasetID := "etl_test"
+	client := setupBQTables(t, ctx, projectID, datasetID)
 
 	// Create and start pipeline with shorter interval for testing
 	pipeline, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
 		Source: &identityBQSyncer{
-			sourceDB: sourceDB,
-			client:   client,
-			dataset:  dataset,
+			sourceDB:  sourceDB,
+			client:    client,
+			datasetID: datasetID,
 		},
 		QueueDB:                 pipelineSQLDB,
-		QueueName:               "bigquery_etl",
+		QueueName:               "identity_system_etl_bq_target",
 		PageSize:                10,
 		Interval:                3 * time.Second, // Shorter interval for faster testing
 		ConsistencyDelay:        1 * time.Second, // Shorter delay for faster testing
@@ -797,7 +799,7 @@ func TestPipeline_BQTarget(t *testing.T) {
 	time.Sleep(60 * time.Second)
 
 	// Verify results in BigQuery after this sync
-	verifyBigQueryTargetData(t, ctx, client, dataset)
+	verifyBigQueryTargetData(t, ctx, client, datasetID)
 	t.Log("✅ First ETL sync completed successfully")
 
 	// === Second Round: Test incremental soft delete → physical delete ===
@@ -821,7 +823,7 @@ func TestPipeline_BQTarget(t *testing.T) {
 	time.Sleep(60 * time.Second)
 
 	// Verify that Alice and her credentials are physically deleted from BigQuery
-	verifyBigQueryTargetDataAfterDeletion(t, ctx, client, dataset)
+	verifyBigQueryTargetDataAfterDeletion(t, ctx, client, datasetID)
 
 	t.Log("✅ BigQuery ETL test completed successfully")
 }
@@ -829,9 +831,9 @@ func TestPipeline_BQTarget(t *testing.T) {
 // ====== Source Implementation for BigQuery ETL ======
 
 type identityBQSyncer struct {
-	sourceDB *gorm.DB
-	client   *bigquery.Client
-	dataset  *bigquery.Dataset
+	sourceDB  *gorm.DB
+	client    *bigquery.Client
+	datasetID string
 }
 
 var _ etl.Source[*etl.Cursor] = (*identityBQSyncer)(nil)
@@ -922,7 +924,7 @@ func (s *identityBQSyncer) Extract(ctx context.Context, req *etl.ExtractRequest[
 	// Create BigQuery target
 	target, err := bqtarget.New(&bqtarget.Config[*etl.Cursor]{
 		Client:     s.client,
-		DatasetID:  s.dataset.DatasetID,
+		DatasetID:  s.datasetID,
 		Req:        req,
 		Datas:      datas,
 		CommitFunc: s.commit,
@@ -1125,9 +1127,8 @@ func (s *identityBQSyncer) commit(ctx context.Context, input *bqtarget.CommitInp
 
 // verifyBigQueryTargetData verifies the data in BigQuery after ETL sync
 // It verifies all records and all fields to ensure data integrity
-func verifyBigQueryTargetData(t *testing.T, ctx context.Context, client *bigquery.Client, dataset *bigquery.Dataset) {
+func verifyBigQueryTargetData(t *testing.T, ctx context.Context, client *bigquery.Client, datasetID string) {
 	projectID := client.Project()
-	datasetID := dataset.DatasetID
 
 	// Query all identities with all fields
 	identitiesQuery := client.Query(fmt.Sprintf("SELECT * FROM `%s.%s.identities` ORDER BY id", projectID, datasetID))
@@ -1362,9 +1363,8 @@ func verifyBigQueryTargetData(t *testing.T, ctx context.Context, client *bigquer
 
 // verifyBigQueryTargetDataAfterDeletion verifies that Alice and her credentials are physically deleted from BigQuery
 // It verifies all records and all fields to ensure data integrity
-func verifyBigQueryTargetDataAfterDeletion(t *testing.T, ctx context.Context, client *bigquery.Client, dataset *bigquery.Dataset) {
+func verifyBigQueryTargetDataAfterDeletion(t *testing.T, ctx context.Context, client *bigquery.Client, datasetID string) {
 	projectID := client.Project()
-	datasetID := dataset.DatasetID
 
 	// Query all identities with all fields to verify Alice (user1) is physically deleted
 	identitiesQuery := client.Query(fmt.Sprintf("SELECT * FROM `%s.%s.identities` ORDER BY id", projectID, datasetID))
@@ -1568,7 +1568,7 @@ func setupTestDatabasesForBQ(t *testing.T, ctx context.Context) (*gorm.DB, *sql.
 }
 
 // setupBQTables creates or ensures the BigQuery dataset and tables exist
-func setupBQTables(t *testing.T, ctx context.Context, projectID, datasetID string) (*bigquery.Client, *bigquery.Dataset) {
+func setupBQTables(t *testing.T, ctx context.Context, projectID, datasetID string) *bigquery.Client {
 	client, err := bigquery.NewClient(ctx, projectID)
 	require.NoError(t, err, "Failed to create BigQuery client")
 	t.Cleanup(func() { _ = client.Close() })
@@ -1596,7 +1596,7 @@ func setupBQTables(t *testing.T, ctx context.Context, projectID, datasetID strin
 	// Create tables in the dataset
 	createTables(t, ctx, client, dataset)
 
-	return client, dataset
+	return client
 }
 
 // TableConfig represents a table configuration
