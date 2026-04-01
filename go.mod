@@ -7,13 +7,13 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/qor5/go-bus v0.0.0-20250731113321-2c127f29aaaa
 	github.com/qor5/go-que v1.1.1
-	github.com/qor5/x/v3 v3.2.0
+	github.com/qor5/x/v3 v3.2.1-0.20260401075958-4a01400c9edc
 	github.com/samber/lo v1.52.0
 	github.com/stretchr/testify v1.11.1
 	github.com/theplant/appkit v0.0.0-20250528023215-3d0d299dc4c6
 	google.golang.org/api v0.254.0
 	gorm.io/datatypes v1.2.7
-	gorm.io/gorm v1.31.0
+	gorm.io/gorm v1.31.1
 )
 
 require (
@@ -23,10 +23,11 @@ require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.5.3 // indirect
 	dario.cat/mergo v1.0.2 // indirect
-	filippo.io/edwards25519 v1.1.0 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/airbrake/gobrake/v5 v5.6.1 // indirect
+	github.com/allegro/bigcache/v3 v3.1.0 // indirect
 	github.com/apache/arrow/go/v15 v15.0.2 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.38.1 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.29.6 // indirect
@@ -52,7 +53,8 @@ require (
 	github.com/containerd/platforms v0.2.1 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
+	github.com/dgraph-io/ristretto/v2 v2.3.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/docker v28.3.3+incompatible // indirect
 	github.com/docker/go-connections v0.5.0 // indirect
@@ -116,6 +118,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/qor5/confx v0.0.0-20250426065316-0d28db5b4d54 // indirect
+	github.com/redis/go-redis/v9 v9.16.0 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/sagikazarmark/locafero v0.6.0 // indirect
@@ -129,7 +132,8 @@ require (
 	github.com/spf13/viper v1.19.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/testcontainers/testcontainers-go v0.38.0 // indirect
-	github.com/theplant/inject v1.1.0 // indirect
+	github.com/theplant/cachex v0.0.0-20251210183652-8e675368cbc5 // indirect
+	github.com/theplant/inject v1.2.2 // indirect
 	github.com/tklauser/go-sysconf v0.3.15 // indirect
 	github.com/tklauser/numcpus v0.10.0 // indirect
 	github.com/uber/jaeger-client-go v2.29.1+incompatible // indirect
