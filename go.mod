@@ -7,7 +7,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/qor5/go-bus v0.0.0-20250731113321-2c127f29aaaa
 	github.com/qor5/go-que v1.1.1
-	github.com/qor5/x/v3 v3.2.1-0.20260401075146-4e6cc46294fb
+	github.com/qor5/x/v3 v3.2.1-0.20260320073118-538e7ba2e1b8
 	github.com/samber/lo v1.52.0
 	github.com/stretchr/testify v1.11.1
 	github.com/theplant/appkit v0.0.0-20250528023215-3d0d299dc4c6
