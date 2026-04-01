@@ -324,8 +324,8 @@ github.com/qor5/go-bus v0.0.0-20250731113321-2c127f29aaaa h1:occnZcByMdRE7LSualI
 github.com/qor5/go-bus v0.0.0-20250731113321-2c127f29aaaa/go.mod h1:U7v/C7reFIQcF+GVh5ALCSWF52pnRno81c76mWYiTMs=
 github.com/qor5/go-que v1.1.1 h1:oxdPjOXfyQ/VDNzpQwsizIeNwy+Fe5JzTzApSquGVs0=
 github.com/qor5/go-que v1.1.1/go.mod h1:Lr7v3pu3j2cY4TAOH2vXzGGLLnDrVuS4mlEFgvE4sGg=
-github.com/qor5/x/v3 v3.2.1-0.20260320073118-538e7ba2e1b8 h1:/6D0uu0av5DPpRAGzosnCPijw292zImmtyLEC+0izME=
-github.com/qor5/x/v3 v3.2.1-0.20260320073118-538e7ba2e1b8/go.mod h1:pj2vSm+P4UMxQJ77fbaloLuiSkeSjjmy8jw41+tiuys=
+github.com/qor5/x/v3 v3.2.1-0.20260401075958-4a01400c9edc h1:1Ql//oAic45n414GPo2PgxWWerM+NJZcnDtCyd5NVq8=
+github.com/qor5/x/v3 v3.2.1-0.20260401075958-4a01400c9edc/go.mod h1:pj2vSm+P4UMxQJ77fbaloLuiSkeSjjmy8jw41+tiuys=
 github.com/redis/go-redis/v9 v9.16.0 h1:OotgqgLSRCmzfqChbQyG1PHC3tLNR89DG4jdOERSEP4=
 github.com/redis/go-redis/v9 v9.16.0/go.mod h1:u410H11HMLoB+TP67dz8rL9s6QW2j76l0//kSOd3370=
 github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
