@@ -419,7 +419,9 @@ func (s *identitySyncer) commit(ctx context.Context, input *pgtarget.CommitInput
 					
 		`
 
-	if err := input.DB.WithContext(ctx).Exec(query).Error; err != nil {
+	if err := input.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return tx.Exec(query).Error
+	}); err != nil {
 		return nil, errors.Wrapf(err, "failed to execute commit query")
 	}
 

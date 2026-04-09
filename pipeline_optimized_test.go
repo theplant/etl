@@ -287,7 +287,9 @@ func (s *optimizedIdentitySyncer) commit(ctx context.Context, input *pgtarget.Co
 						VALUES (s.id, s.credential_id, s.type, s.value, s.created_at, s.updated_at);
 		`
 
-	if err := input.DB.WithContext(ctx).Exec(query).Error; err != nil {
+	if err := input.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return tx.Exec(query).Error
+	}); err != nil {
 		return nil, errors.Wrapf(err, "failed to execute commit query")
 	}
 
