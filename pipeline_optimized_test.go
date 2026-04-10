@@ -283,9 +283,9 @@ func (s *optimizedIdentitySyncer) commit(ctx context.Context, input *pgtarget.Co
 						VALUES (s.id, s.credential_id, s.type, s.value, s.created_at, s.updated_at);
 		`
 
-	if err := input.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Exec(query).Error
-	}); err != nil {
+	// No need for explicit transaction: db.Exec with multiple statements
+	// runs in a single implicit transaction in PostgreSQL.
+	if err := input.DB.WithContext(ctx).Exec(query).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed to execute commit query")
 	}
 
@@ -336,23 +336,39 @@ func TestIdentitySyncer_Optimized(t *testing.T) {
 	// === Round 2: Soft delete user -> physical delete in target ===
 	t.Log("Round 2: Soft delete Alice and sync")
 
-	// Soft delete user1 (Alice)
-	result := sourceDB.Where("id = ?", "user1").Delete(&OptimizedUser{})
-	require.NoError(t, result.Error)
-	require.Equal(t, int64(1), result.RowsAffected)
+	// Soft delete Alice, her credentials, and update user's credential_updated_at/updated_at
+	// all in a single transaction — mirroring what the application layer should do in production.
+	// Order: soft delete credentials → update user timestamps → soft delete user (so deleted_at is latest).
+	now := time.Now()
+	require.NoError(t, sourceDB.Transaction(func(tx *gorm.DB) error {
+		// 1. Soft delete credentials
+		result := tx.Where("user_id = ?", "user1").Delete(&UserCred{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected < 1 {
+			return errors.New("expected to soft delete at least 1 credential")
+		}
 
-	// Soft delete ALL of Alice's credentials
-	result = sourceDB.Where("user_id = ?", "user1").Delete(&UserCred{})
-	require.NoError(t, result.Error)
-	require.GreaterOrEqual(t, result.RowsAffected, int64(1))
+		// 2. Update user's credential_updated_at and updated_at
+		if err := tx.Model(&OptimizedUser{}).Where("id = ?", "user1").
+			Updates(map[string]any{
+				"credential_updated_at": now,
+				"updated_at":            now,
+			}).Error; err != nil {
+			return err
+		}
 
-	// Update credential_updated_at to reflect the creds change.
-	// In production this would be done by the application layer or a DB trigger.
-	// Note: updated_at is already bumped by the soft delete above (via gormx.SoftDeleteUpdatedAtPlugin),
-	// and the Extract query uses GREATEST(updated_at, deleted_at) so it would capture this even
-	// without the plugin. We only need to maintain credential_updated_at here.
-	require.NoError(t, sourceDB.Unscoped().Model(&OptimizedUser{}).Where("id = ?", "user1").
-		Update("credential_updated_at", time.Now()).Error)
+		// 3. Soft delete user last, so deleted_at >= updated_at
+		result = tx.Where("id = ?", "user1").Delete(&OptimizedUser{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("expected to soft delete 1 user")
+		}
+		return nil
+	}))
 
 	time.Sleep(5 * time.Second)
 
@@ -362,21 +378,23 @@ func TestIdentitySyncer_Optimized(t *testing.T) {
 	// === Round 3: Update credential -> incremental sync ===
 	t.Log("Round 3: Update Bob's credential and sync")
 
-	// Update Bob's password credential value
-	now := time.Now()
-	require.NoError(t, sourceDB.Model(&UserCred{}).Where("id = ?", "cred3").
-		Updates(map[string]any{
-			"cred_value": "new_hashed_password_bob",
-			"updated_at": now,
-		}).Error)
-
-	// Update Bob's credential_updated_at and updated_at to reflect the creds change.
-	// In production this would be done by the application layer or a DB trigger.
-	require.NoError(t, sourceDB.Model(&OptimizedUser{}).Where("id = ?", "user2").
-		Updates(map[string]any{
-			"credential_updated_at": now,
-			"updated_at":            now,
-		}).Error)
+	// Update Bob's credential and propagate the change to the user record
+	// in a single transaction — mirroring what the application layer should do in production.
+	now = time.Now()
+	require.NoError(t, sourceDB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&UserCred{}).Where("id = ?", "cred3").
+			Updates(map[string]any{
+				"cred_value": "new_hashed_password_bob",
+				"updated_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&OptimizedUser{}).Where("id = ?", "user2").
+			Updates(map[string]any{
+				"credential_updated_at": now,
+				"updated_at":            now,
+			}).Error
+	}))
 
 	time.Sleep(5 * time.Second)
 
@@ -601,6 +619,7 @@ func prepareOptimizedSourceTestData(t *testing.T, db *gorm.DB) {
 	require.NoError(t, db.Create(&userCreds).Error, "Failed to create user credentials")
 
 	// Soft-deleted data
+	// With SoftDeleteUpdatedAtPlugin, updated_at is bumped to match deleted_at on soft delete.
 	deletedAt := now.AddDate(0, 0, -5)
 	deletedUsers := []OptimizedUser{
 		{
@@ -609,9 +628,9 @@ func prepareOptimizedSourceTestData(t *testing.T, db *gorm.DB) {
 			Email:               "dave@example.com",
 			DisplayName:         "Dave (Deleted)",
 			Status:              "inactive",
-			CredentialUpdatedAt: now.AddDate(0, 0, -6),
+			CredentialUpdatedAt: deletedAt,
 			CreatedAt:           now.AddDate(0, 0, -10),
-			UpdatedAt:           now.AddDate(0, 0, -6),
+			UpdatedAt:           deletedAt,
 			DeletedAt:           gorm.DeletedAt{Time: deletedAt, Valid: true},
 		},
 		{
@@ -622,7 +641,7 @@ func prepareOptimizedSourceTestData(t *testing.T, db *gorm.DB) {
 			Status:              "inactive",
 			CredentialUpdatedAt: deletedAt,
 			CreatedAt:           now.AddDate(0, 0, -8),
-			UpdatedAt:           now.AddDate(0, 0, -4),
+			UpdatedAt:           deletedAt,
 			DeletedAt:           gorm.DeletedAt{Time: deletedAt, Valid: true},
 		},
 	}
@@ -637,7 +656,7 @@ func prepareOptimizedSourceTestData(t *testing.T, db *gorm.DB) {
 			CredValue:  "hashed_password_dave",
 			IsActive:   false,
 			CreatedAt:  now.AddDate(0, 0, -10),
-			UpdatedAt:  now.AddDate(0, 0, -6),
+			UpdatedAt:  deletedAt,
 			DeletedAt:  gorm.DeletedAt{Time: deletedAt, Valid: true},
 		},
 		{
@@ -648,7 +667,7 @@ func prepareOptimizedSourceTestData(t *testing.T, db *gorm.DB) {
 			CredValue:  "old_hashed_password_alice",
 			IsActive:   false,
 			CreatedAt:  now.AddDate(0, 0, -15),
-			UpdatedAt:  now.AddDate(0, 0, -10),
+			UpdatedAt:  deletedAt,
 			DeletedAt:  gorm.DeletedAt{Time: deletedAt, Valid: true},
 		},
 	}
