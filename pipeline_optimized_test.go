@@ -48,7 +48,7 @@ var _ etl.Source[*etl.Cursor] = (*optimizedIdentitySyncer)(nil)
 func (s *optimizedIdentitySyncer) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
 	cursor := req.After
 
-	// Optimized approach: paginate by (max_at, id) on a single table.
+	// Optimized approach: paginate by (updated_at, id) on a single table.
 	//
 	// By denormalizing credential_updated_at onto the user record (maintained by the application
 	// layer or a DB trigger on every creds INSERT/UPDATE/DELETE), updating any credential
@@ -56,34 +56,30 @@ func (s *optimizedIdentitySyncer) Extract(ctx context.Context, req *etl.ExtractR
 	// monitor the user table's updated_at to capture both user-level AND credential-level changes,
 	// eliminating the expensive LEFT JOIN + GROUP BY + CTE required in pipeline_test.go's approach.
 	//
-	// max_at = GREATEST(updated_at, COALESCE(deleted_at, updated_at)) is needed because
-	// vanilla GORM only sets deleted_at on soft delete without updating updated_at.
-	// If you want to paginate solely on updated_at (without GREATEST), enable
-	// gormx.SoftDeleteUpdatedAtPlugin — it updates updated_at alongside deleted_at
-	// on soft delete, so updated_at alone becomes a reliable sync cursor.
+	// Prerequisite: gormx.SoftDeleteUpdatedAtPlugin must be enabled (auto-registered via
+	// gormx.Open()). This plugin updates updated_at alongside deleted_at on soft delete,
+	// so updated_at alone is a reliable sync cursor. This is consistent with the MERGE
+	// guard `s.updated_at > t.updated_at` — both Extract and MERGE use the same field.
 	//
 	// The result is a simple single-table query with no JOIN, GROUP BY, CTE, or subquery.
 	//
 	// Note: Query ALL records including soft-deleted ones for soft->physical delete conversion.
 
 	usersQuery := `
-		WITH user_max_at AS (
-			SELECT *, GREATEST(updated_at, COALESCE(deleted_at, updated_at)) AS max_at
-			FROM optimized_users
-		)
-		SELECT * FROM user_max_at uma
+		SELECT *, updated_at AS max_at
+		FROM optimized_users
 		WHERE 1=1`
 	args := []any{}
 
 	if cursor != nil && (!cursor.At.IsZero() || cursor.ID != "") {
-		usersQuery += ` AND (uma.max_at, uma.id) > (?, ?)`
+		usersQuery += ` AND (updated_at, id) > (?, ?)`
 		args = append(args, cursor.At, cursor.ID)
 	}
 
-	usersQuery += ` AND uma.max_at >= ? AND uma.max_at < ?`
+	usersQuery += ` AND updated_at >= ? AND updated_at < ?`
 	args = append(args, req.FromAt, req.BeforeAt)
 
-	usersQuery += ` ORDER BY uma.max_at ASC, uma.id ASC LIMIT ?`
+	usersQuery += ` ORDER BY updated_at ASC, id ASC LIMIT ?`
 	args = append(args, req.First+1)
 
 	// Define a struct to capture the Raw query results including max_at
