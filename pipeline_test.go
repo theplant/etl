@@ -161,8 +161,13 @@ var _ etl.Source[*etl.Cursor] = (*identitySyncer)(nil)
 func (s *identitySyncer) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
 	cursor := req.After
 
-	// Use CTE to calculate max update time across all related tables for each user
-	// This approach is more scalable and performant when dealing with multiple tables
+	// ⚠️ PERFORMANCE WARNING: This CTE approach has poor performance at scale (100K+ rows).
+	// The CTE scans the ENTIRE users table with a LEFT JOIN + GROUP BY on every ETL cycle,
+	// even if only a few records changed. Time-window filtering (FromAt/BeforeAt) is applied
+	// AFTER the full aggregation, so indexes cannot help.
+	//
+	// For an optimized approach using a denormalized credential_updated_at column,
+	// see TestIdentitySyncer_Optimized in pipeline_optimized_test.go.
 	// Note: Query ALL records including soft-deleted ones for soft→physical delete conversion
 	usersQuery := `
 		WITH user_max_at AS (
@@ -414,6 +419,8 @@ func (s *identitySyncer) commit(ctx context.Context, input *pgtarget.CommitInput
 					
 		`
 
+	// No need for explicit transaction: db.Exec with multiple statements
+	// runs in a single implicit transaction in PostgreSQL.
 	if err := input.DB.WithContext(ctx).Exec(query).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed to execute commit query")
 	}
@@ -839,8 +846,8 @@ var _ etl.Source[*etl.Cursor] = (*identityBQSyncer)(nil)
 func (s *identityBQSyncer) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
 	cursor := req.After
 
-	// Use CTE to calculate max update time across all related tables for each user
-	// This approach is more scalable and performant when dealing with multiple tables
+	// ⚠️ PERFORMANCE WARNING: Same CTE full-table scan issue as identitySyncer.Extract.
+	// See pipeline_optimized_test.go for the optimized approach.
 	// Note: Query ALL records including soft-deleted ones for soft→physical delete conversion
 	usersQuery := `
 		WITH user_max_at AS (
