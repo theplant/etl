@@ -233,7 +233,7 @@ controller, err := oneShot.Start(ctx, &etl.Cursor{})
 
 // Submit a targeted task: render the INSERT statement and execute it
 // against the queue database (typically handed to an operator).
-sqlText, _ := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, MyFilter]{
+sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, MyFilter]{
     QueueName:   "USER_SYNC_ONESHOT",
     PageSize:    500,
     SeedCursor:  &etl.Cursor{},
@@ -250,9 +250,14 @@ applies):
 func (s *MySource) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
     // ...
     if req.OneShotFilter != nil {
-        filter, err := etl.UnmarshalOneShotFilter[MyFilter](req.OneShotFilter) // rejects unknown fields
+        filter, err := etl.UnmarshalOneShotFilter[MyFilter](req.OneShotFilter) // rejects unknown fields and null
         if err != nil {
             return nil, err
+        }
+        // Guard against an accidentally empty filter (e.g. {}): an empty
+        // predicate would silently sync nothing and report success.
+        if len(filter.IDs) == 0 {
+            return nil, errors.New("filter must specify at least one id")
         }
         query += ` AND id IN ?`
         args = append(args, filter.IDs)
