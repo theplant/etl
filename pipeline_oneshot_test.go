@@ -86,7 +86,6 @@ func userIDs(from, to int) []string {
 // and helpers that submit tasks exactly the way production does — render the
 // INSERT with BuildOneShotJobSQL and execute it verbatim.
 type oneShotEnv struct {
-	t        *testing.T
 	ctx      context.Context
 	sourceDB *gorm.DB
 	targetDB *gorm.DB
@@ -100,13 +99,13 @@ func newOneShotEnv(t *testing.T) *oneShotEnv {
 	sourceDB, targetDB, queueDB := setupTestDatabases(t, ctx)
 	require.NoError(t, sourceDB.AutoMigrate(&OptimizedUser{}), "Failed to migrate optimized_users table")
 
-	e := &oneShotEnv{t: t, ctx: ctx, sourceDB: sourceDB, targetDB: targetDB, queueDB: queueDB}
-	e.seedUsers(12)
+	e := &oneShotEnv{ctx: ctx, sourceDB: sourceDB, targetDB: targetDB, queueDB: queueDB}
+	e.seedUsers(t, 12)
 	return e
 }
 
-func (e *oneShotEnv) seedUsers(n int) {
-	e.t.Helper()
+func (e *oneShotEnv) seedUsers(t *testing.T, n int) {
+	t.Helper()
 	now := time.Now()
 	for i := 1; i <= n; i++ {
 		id := userID(i)
@@ -120,7 +119,7 @@ func (e *oneShotEnv) seedUsers(n int) {
 			CreatedAt:           now.AddDate(0, 0, -2),
 			UpdatedAt:           now.AddDate(0, 0, -1),
 		}
-		require.NoError(e.t, e.sourceDB.Create(user).Error, "Failed to create %s", id)
+		require.NoError(t, e.sourceDB.Create(user).Error, "Failed to create %s", id)
 
 		cred := &UserCred{
 			ID:         id + "_cred",
@@ -132,7 +131,7 @@ func (e *oneShotEnv) seedUsers(n int) {
 			CreatedAt:  now.AddDate(0, 0, -2),
 			UpdatedAt:  now.AddDate(0, 0, -1),
 		}
-		require.NoError(e.t, e.sourceDB.Create(cred).Error, "Failed to create cred for %s", id)
+		require.NoError(t, e.sourceDB.Create(cred).Error, "Failed to create cred for %s", id)
 	}
 }
 
@@ -142,23 +141,26 @@ func (e *oneShotEnv) syncer() *optimizedIdentitySyncer {
 
 // --- goque_jobs observation ---
 
-func (e *oneShotEnv) countJobs(queue string) int {
+func (e *oneShotEnv) countJobs(t *testing.T, queue string) int {
+	t.Helper()
 	var n int
-	require.NoError(e.t, e.queueDB.QueryRowContext(e.ctx,
+	require.NoError(t, e.queueDB.QueryRowContext(e.ctx,
 		`SELECT count(*) FROM goque_jobs WHERE queue = $1`, queue).Scan(&n))
 	return n
 }
 
-func (e *oneShotEnv) countPending(queue string) int {
+func (e *oneShotEnv) countPending(t *testing.T, queue string) int {
+	t.Helper()
 	var n int
-	require.NoError(e.t, e.queueDB.QueryRowContext(e.ctx,
+	require.NoError(t, e.queueDB.QueryRowContext(e.ctx,
 		`SELECT count(*) FROM goque_jobs WHERE queue = $1 AND expired_at IS NULL AND done_at IS NULL`, queue).Scan(&n))
 	return n
 }
 
-func (e *oneShotEnv) countExpired(queue string) int {
+func (e *oneShotEnv) countExpired(t *testing.T, queue string) int {
+	t.Helper()
 	var n int
-	require.NoError(e.t, e.queueDB.QueryRowContext(e.ctx,
+	require.NoError(t, e.queueDB.QueryRowContext(e.ctx,
 		`SELECT count(*) FROM goque_jobs WHERE queue = $1 AND expired_at IS NOT NULL`, queue).Scan(&n))
 	return n
 }
@@ -167,13 +169,13 @@ func (e *oneShotEnv) countExpired(queue string) int {
 // that means every page job was destroyed and no successor was enqueued.
 func (e *oneShotEnv) waitDrained(t *testing.T, queue string) {
 	t.Helper()
-	require.Eventually(t, func() bool { return e.countJobs(queue) == 0 },
+	require.Eventually(t, func() bool { return e.countJobs(t, queue) == 0 },
 		60*time.Second, 200*time.Millisecond, "queue %s should drain", queue)
 }
 
 func (e *oneShotEnv) waitExpired(t *testing.T, queue string, n int) {
 	t.Helper()
-	require.Eventually(t, func() bool { return e.countExpired(queue) == n },
+	require.Eventually(t, func() bool { return e.countExpired(t, queue) == n },
 		60*time.Second, 200*time.Millisecond, "queue %s should have %d expired job(s)", queue, n)
 }
 
@@ -245,7 +247,7 @@ func (e *oneShotEnv) startOneShot(t *testing.T, queue string, source etl.Source[
 	require.NoError(t, err, "Failed to start one-shot pipeline")
 	t.Cleanup(func() { _ = controller.Stop(context.Background()) })
 
-	assert.Equal(t, 0, e.countJobs(queue), "one-shot Start must not enqueue a seed job")
+	assert.Equal(t, 0, e.countJobs(t, queue), "one-shot Start must not enqueue a seed job")
 }
 
 // startChain boots an incremental pipeline on its own queue and stops it when
@@ -379,7 +381,7 @@ func TestOneShotPipeline(t *testing.T) {
 
 		// ...while a different filter coexists in the same queue.
 		env.submit(t, queue, OptimizedUserFilter{IDs: []string{"user03"}})
-		assert.Equal(t, 2, env.countJobs(queue))
+		assert.Equal(t, 2, env.countJobs(t, queue))
 
 		// This queue has no worker to drain it; clean up by hand.
 		_, err = env.queueDB.ExecContext(env.ctx, `DELETE FROM goque_jobs WHERE queue = $1`, queue)
@@ -417,7 +419,7 @@ func TestOneShotPipeline(t *testing.T) {
 		assert.Contains(t, err.Error(), "goque_jobs_unique_uidx")
 
 		env.waitExpired(t, queue, 1)
-		assert.Equal(t, 1, env.countJobs(queue), "no successor job may be enqueued on failure")
+		assert.Equal(t, 1, env.countJobs(t, queue), "no successor job may be enqueued on failure")
 		assert.Equal(t, 2, failing.callCount(), "MaxRetryCount 1 means the initial attempt plus one retry")
 
 		// Expiry released the unique id: the same statement is accepted again.
@@ -448,7 +450,7 @@ func TestOneShotPipeline(t *testing.T) {
 		// one pending window job — neither consumed nor duplicated.
 		env.submit(t, oneShotQueue, OptimizedUserFilter{IDs: []string{"user01"}})
 		env.waitDrained(t, oneShotQueue)
-		assert.Equal(t, 1, env.countPending(chainQueue), "the chain's single pending job must be untouched")
+		assert.Equal(t, 1, env.countPending(t, chainQueue), "the chain's single pending job must be untouched")
 
 		// A one-shot (filtered) job manually inserted into the incremental
 		// queue must be expired instead of misinterpreted — and the chain
@@ -456,7 +458,7 @@ func TestOneShotPipeline(t *testing.T) {
 		env.insertRawJob(t, chainQueue,
 			`[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":10,"OneShotFilter":{"ids":["user01"]}}]`)
 		env.waitExpired(t, chainQueue, 1)
-		assert.Equal(t, 1, env.countPending(chainQueue), "the chain must keep running after expiring the mismatched job")
+		assert.Equal(t, 1, env.countPending(t, chainQueue), "the chain must keep running after expiring the mismatched job")
 	})
 }
 
