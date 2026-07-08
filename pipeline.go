@@ -594,8 +594,13 @@ func (s *Pipeline[T]) processOneShot(ctx context.Context, job que.Job, req *Extr
 }
 
 // enqueueOneShotJob enqueues a one-shot job. Unlike enqueueJob it applies no
-// time-window math and sets no UniqueID, so multiple one-shot jobs can
-// coexist in the same queue.
+// time-window math. The job's UniqueID is derived from the filter (see
+// OneShotUniqueID) with que.Lockable lifecycle: while a task is in flight an
+// identical filter cannot be enqueued again; tasks with different filters
+// coexist. Next-page jobs carry the same filter and thus the same UniqueID —
+// destroying the previous page and inserting the next in one transaction
+// hands the id over, keeping the whole task exclusive until its last page
+// completes or a page expires.
 func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *ExtractRequest[T], runAt time.Time) error {
 	if len(req.OneShotFilter) == 0 {
 		return errors.New("filter is required for one-shot job")
@@ -604,11 +609,14 @@ func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *Ex
 		return errors.New("filter must be valid JSON")
 	}
 
+	uniqueID := OneShotUniqueID(req.OneShotFilter)
 	plan := que.Plan{
-		Queue:       s.QueueName,
-		Args:        que.Args(req),
-		RunAt:       runAt,
-		RetryPolicy: *s.RetryPolicy,
+		Queue:           s.QueueName,
+		Args:            que.Args(req),
+		RunAt:           runAt,
+		RetryPolicy:     *s.RetryPolicy,
+		UniqueID:        &uniqueID,
+		UniqueLifecycle: que.Lockable,
 	}
 
 	jobIDs, err := s.queue.Enqueue(ctx, tx, plan)
@@ -627,6 +635,11 @@ func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *Ex
 // matched by filter (a Source-defined criteria document, see MarshalOneShotFilter).
 // Only valid on OneShot pipelines. seedCursor is the pagination start,
 // usually the cursor zero value.
+//
+// While a task with an identical filter is in flight, enqueueing is rejected
+// with an error wrapping que.ErrViolateUniqueConstraint (mis-operation
+// protection); once that task completes or expires, the same filter can be
+// fired again.
 func (s *Pipeline[T]) EnqueueOneShot(ctx context.Context, seedCursor T, filter json.RawMessage) error {
 	if !s.OneShot {
 		return errors.New("EnqueueOneShot is only supported on OneShot pipelines")
@@ -638,9 +651,15 @@ func (s *Pipeline[T]) EnqueueOneShot(ctx context.Context, seedCursor T, filter j
 		OneShotFilter: filter,
 	}
 
-	return sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {
+	err := sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {
 		return s.enqueueOneShotJob(ctx, tx, req, time.Now())
 	})
+	if errors.Is(err, que.ErrViolateUniqueConstraint) {
+		// Deliberately surfaced, not swallowed: this is duplicate-insert
+		// protection, so the trigger must learn the task was NOT accepted.
+		return errors.Wrap(err, "an identical one-shot task is already in flight")
+	}
+	return err
 }
 
 // createNextExtractRequest creates the next job request based on current result

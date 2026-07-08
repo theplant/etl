@@ -266,11 +266,19 @@ Semantics:
 - On failure the job retries per `RetryPolicy` and is expired (with the
   error recorded) when retries are exhausted. The circuit breaker only
   governs the incremental chain.
-- One-shot jobs carry no `UniqueID`, so multiple targeted tasks can coexist.
+- One-shot jobs get a `UniqueID` derived from the filter bytes (see
+  `OneShotUniqueID`) with `Lockable` lifecycle: while a task is in flight, an
+  identical filter cannot be double-fired (`EnqueueOneShot` returns an error
+  wrapping `que.ErrViolateUniqueConstraint`); completion or expiry releases
+  the id so the same filter can be fired again. Tasks with different filters
+  coexist.
 - A job whose args do not match the pipeline's mode (e.g. a filtered job
   inserted into an incremental queue) is expired immediately.
 - Jobs can also be submitted by inserting a row into `goque_jobs` directly;
   the args are the JSON-serialized `ExtractRequest` including `OneShotFilter`.
+  Set a human-readable `unique_id` (e.g. a ticket number like
+  `etl_oneshot_KGM-1234`) with `unique_lifecycle = 3` (Lockable) so
+  accidental duplicate inserts are rejected too.
 
 ### Custom Cursor Types
 
