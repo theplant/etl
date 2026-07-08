@@ -35,8 +35,9 @@ type PipelineConfig[T any] struct {
 
 	// OneShot switches the pipeline from the incremental chain mode to the
 	// targeted one-shot mode:
-	//   - Start does not enqueue a seed job; jobs are submitted explicitly
-	//     via EnqueueOneShot, each carrying a Source-defined OneShotFilter.
+	//   - Start does not enqueue a seed job; jobs are submitted by executing
+	//     a goque_jobs INSERT rendered by BuildOneShotJobSQL, each carrying a
+	//     Source-defined OneShotFilter.
 	//   - Every job must carry a OneShotFilter; the Source uses it instead of the
 	//     FromAt/BeforeAt time window to select records.
 	//   - On success the job is destroyed. If the filtered set spans multiple
@@ -138,7 +139,8 @@ func NewPipeline[T any](conf *PipelineConfig[T]) (*Pipeline[T], error) {
 
 // Start starts the ETL processing. For incremental pipelines it also enqueues
 // the seed job; for one-shot pipelines it only starts the worker (seedCursor
-// is unused) — jobs are submitted via EnqueueOneShot.
+// is unused) — jobs are submitted by executing SQL rendered with
+// BuildOneShotJobSQL.
 func (s *Pipeline[T]) Start(ctx context.Context, seedCursor T) (quex.WorkerController, error) {
 	if !s.OneShot {
 		if err := s.enqueueSeedJob(ctx, seedCursor); err != nil {
@@ -629,37 +631,6 @@ func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *Ex
 	}
 
 	return nil
-}
-
-// EnqueueOneShot submits a targeted one-shot job that syncs only the records
-// matched by filter (a Source-defined criteria document, see MarshalOneShotFilter).
-// Only valid on OneShot pipelines. seedCursor is the pagination start,
-// usually the cursor zero value.
-//
-// While a task with an identical filter is in flight, enqueueing is rejected
-// with an error wrapping que.ErrViolateUniqueConstraint (mis-operation
-// protection); once that task completes or expires, the same filter can be
-// fired again.
-func (s *Pipeline[T]) EnqueueOneShot(ctx context.Context, seedCursor T, filter json.RawMessage) error {
-	if !s.OneShot {
-		return errors.New("EnqueueOneShot is only supported on OneShot pipelines")
-	}
-
-	req := &ExtractRequest[T]{
-		After:         seedCursor,
-		First:         s.PageSize,
-		OneShotFilter: filter,
-	}
-
-	err := sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {
-		return s.enqueueOneShotJob(ctx, tx, req, time.Now())
-	})
-	if errors.Is(err, que.ErrViolateUniqueConstraint) {
-		// Deliberately surfaced, not swallowed: this is duplicate-insert
-		// protection, so the trigger must learn the task was NOT accepted.
-		return errors.Wrap(err, "an identical one-shot task is already in flight")
-	}
-	return err
 }
 
 // createNextExtractRequest creates the next job request based on current result

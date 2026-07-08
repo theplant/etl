@@ -34,8 +34,8 @@ type ExtractRequest[T any] struct {
 	BeforeAt time.Time // time interval end (exclusive), never zero for consistency
 
 	// OneShotFilter carries the targeting criteria of a one-shot job (see
-	// PipelineConfig.OneShot). It is opaque to the framework: the enqueuer
-	// (Pipeline.EnqueueOneShot) provides it and the Source interprets it,
+	// PipelineConfig.OneShot). It is opaque to the framework: the submitter
+	// (see BuildOneShotJobSQL) provides it and the Source interprets it,
 	// replacing the FromAt/BeforeAt time-window predicate with its own
 	// filter predicate — use UnmarshalOneShotFilter to decode it strictly.
 	// It stays constant across all pages of one one-shot task while After

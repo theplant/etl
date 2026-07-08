@@ -231,9 +231,15 @@ oneShot, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
 // Start only boots the worker — no seed job is enqueued.
 controller, err := oneShot.Start(ctx, &etl.Cursor{})
 
-// Submit a targeted task. The filter schema is defined by your Source.
-filter, _ := etl.MarshalOneShotFilter(&MyFilter{IDs: []string{"user1", "user2"}})
-err = oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, filter)
+// Submit a targeted task: render the INSERT statement and execute it
+// against the queue database (typically handed to an operator).
+sqlText, _ := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, MyFilter]{
+    QueueName:   "USER_SYNC_ONESHOT",
+    PageSize:    500,
+    SeedCursor:  &etl.Cursor{},
+    Filter:      MyFilter{IDs: []string{"user1", "user2"}},
+    RetryPolicy: bus.DefaultRetryPolicyFactory(),
+})
 ```
 
 The Source reads `req.OneShotFilter` in `Extract` and replaces the time-window
@@ -266,21 +272,17 @@ Semantics:
 - On failure the job retries per `RetryPolicy` and is expired (with the
   error recorded) when retries are exhausted. The circuit breaker only
   governs the incremental chain.
-- One-shot jobs get a `UniqueID` derived from the filter bytes (see
+- One-shot jobs get a `unique_id` derived from the filter bytes (see
   `OneShotUniqueID`) with `Lockable` lifecycle: while a task is in flight, an
-  identical filter cannot be double-fired (`EnqueueOneShot` returns an error
-  wrapping `que.ErrViolateUniqueConstraint`); completion or expiry releases
+  identical filter cannot be double-fired — re-executing the same statement
+  violates the `goque_jobs` unique constraint; completion or expiry releases
   the id so the same filter can be fired again. Tasks with different filters
   coexist.
 - A job whose args do not match the pipeline's mode (e.g. a filtered job
   inserted into an incremental queue) is expired immediately.
-- The usual production trigger is a SQL handoff to an operator rather than a
-  code call: `BuildOneShotJobSQL` renders a ready-to-run `goque_jobs` INSERT
-  from a typed filter — same args document, same filter-derived `unique_id`
-  (so double-executing the statement is rejected) and same Lockable lifecycle
-  as `EnqueueOneShot`. Hand-written inserts remain possible; give them a
-  human-readable `unique_id` (e.g. a ticket number like
-  `etl_oneshot_KGM-1234`) with `unique_lifecycle = 3`.
+- Hand-written inserts remain possible; give them a human-readable
+  `unique_id` (e.g. a ticket number like `etl_oneshot_KGM-1234`) with
+  `unique_lifecycle = 3` (Lockable).
 
 ### Custom Cursor Types
 

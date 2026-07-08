@@ -135,6 +135,25 @@ func TestOneShotPipeline(t *testing.T) {
 		return n
 	}
 
+	// All tests submit tasks the way production does: render the INSERT with
+	// BuildOneShotJobSQL and execute it verbatim.
+	buildOneShotSQL := func(t *testing.T, queue string, filter OptimizedUserFilter, policy *que.RetryPolicy) string {
+		t.Helper()
+		sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
+			QueueName:   queue,
+			PageSize:    4,
+			SeedCursor:  &etl.Cursor{},
+			Filter:      filter,
+			RetryPolicy: policy,
+		})
+		require.NoError(t, err)
+		return sqlText
+	}
+	execSQL := func(sqlText string) error {
+		_, err := pipelineSQLDB.ExecContext(ctx, sqlText)
+		return err
+	}
+
 	syncer := &optimizedIdentitySyncer{sourceDB: sourceDB, targetDB: targetDB}
 	source := &recordingSource{inner: syncer}
 
@@ -166,7 +185,8 @@ func TestOneShotPipeline(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("targeted sync of 9 ids", func(t *testing.T) {
-		require.NoError(t, oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, filter))
+		taskSQL := buildOneShotSQL(t, oneShotQueue, OptimizedUserFilter{IDs: targetIDs}, bus.DefaultRetryPolicyFactory())
+		require.NoError(t, execSQL(taskSQL))
 
 		// A finished one-shot task leaves its queue completely empty: every
 		// page job destroyed, no successor of any kind enqueued.
@@ -206,35 +226,10 @@ func TestOneShotPipeline(t *testing.T) {
 		assert.Equal(t, "user08", reqs[2].After.ID, "page 3 continues after the last row of page 2")
 
 		// Completion released the filter-derived unique id (que.Lockable):
-		// the same filter can be fired again.
-		require.NoError(t, oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, filter))
+		// re-executing the very same statement is accepted and runs again.
+		require.NoError(t, execSQL(taskSQL))
 		require.Eventually(t, func() bool { return countRows(oneShotQueue) == 0 },
 			60*time.Second, 200*time.Millisecond, "re-fired task should drain again")
-	})
-
-	t.Run("generated SQL insert drives the same sync", func(t *testing.T) {
-		// The production trigger path: render an INSERT statement from a
-		// typed filter and execute it verbatim (as an operator would),
-		// without going through any Go API.
-		sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
-			QueueName:   oneShotQueue,
-			PageSize:    4,
-			SeedCursor:  &etl.Cursor{},
-			Filter:      OptimizedUserFilter{IDs: []string{"user10"}},
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
-		})
-		require.NoError(t, err)
-
-		_, err = pipelineSQLDB.ExecContext(ctx, sqlText)
-		require.NoError(t, err)
-
-		require.Eventually(t, func() bool { return countRows(oneShotQueue) == 0 },
-			60*time.Second, 200*time.Millisecond, "SQL-inserted task should drain its queue")
-
-		var identity Identity
-		require.NoError(t, targetDB.Where("id = ?", "user10").First(&identity).Error,
-			"the SQL-inserted task should have synced user10")
-		assert.Equal(t, "name_10", identity.Username)
 	})
 
 	t.Run("generated SQL carries dedup id and survives quoting", func(t *testing.T) {
@@ -255,7 +250,7 @@ func TestOneShotPipeline(t *testing.T) {
 		_, err = pipelineSQLDB.ExecContext(ctx, sqlText)
 		require.NoError(t, err)
 
-		// The stored row matches what EnqueueOneShot would have produced.
+		// The stored row carries the document the one-shot worker expects.
 		var argsJSON, uniqueID string
 		var lifecycle int
 		require.NoError(t, pipelineSQLDB.QueryRowContext(ctx,
@@ -275,10 +270,14 @@ func TestOneShotPipeline(t *testing.T) {
 			"filter must survive SQL literal quoting byte-exactly")
 
 		// Executing the same generated SQL again while the task is in flight
-		// violates the unique constraint — the manual path gets the same
-		// duplicate-insert protection as EnqueueOneShot.
+		// violates the unique constraint (duplicate-insert protection).
 		_, err = pipelineSQLDB.ExecContext(ctx, sqlText)
 		require.Error(t, err, "duplicate execution of the generated SQL must be rejected")
+		assert.Contains(t, err.Error(), "goque_jobs_unique_uidx")
+
+		// A different filter coexists in the same queue.
+		require.NoError(t, execSQL(buildOneShotSQL(t, sqlQueue, OptimizedUserFilter{IDs: []string{"user03"}}, bus.DefaultRetryPolicyFactory())))
+		assert.Equal(t, 2, countRows(sqlQueue))
 
 		_, err = pipelineSQLDB.ExecContext(ctx, `DELETE FROM goque_jobs WHERE queue = $1`, sqlQueue)
 		require.NoError(t, err)
@@ -312,9 +311,7 @@ func TestOneShotPipeline(t *testing.T) {
 		}, 60*time.Second, 500*time.Millisecond, "incremental chain should sync all users")
 
 		// Fire another one-shot while the chain is live.
-		reFilter, err := etl.MarshalOneShotFilter(&OptimizedUserFilter{IDs: []string{"user01"}})
-		require.NoError(t, err)
-		require.NoError(t, oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, reFilter))
+		require.NoError(t, execSQL(buildOneShotSQL(t, oneShotQueue, OptimizedUserFilter{IDs: []string{"user01"}}, bus.DefaultRetryPolicyFactory())))
 		require.Eventually(t, func() bool { return countRows(oneShotQueue) == 0 },
 			60*time.Second, 200*time.Millisecond, "second one-shot task should drain its queue")
 
@@ -346,63 +343,23 @@ func TestOneShotPipeline(t *testing.T) {
 			60*time.Second, 200*time.Millisecond, "filter-less job in one-shot queue should be expired")
 	})
 
-	t.Run("identical in-flight tasks are deduplicated", func(t *testing.T) {
-		const dedupQueue = "oneshot_dedup_etl"
-
-		// No worker is started for this queue, so enqueued jobs stay pending
-		// and the in-flight window is deterministic.
-		dedupPipeline, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
-			Source:      syncer,
-			QueueDB:     pipelineSQLDB,
-			QueueName:   dedupQueue,
-			PageSize:    4,
-			OneShot:     true,
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
-		})
-		require.NoError(t, err)
-
-		dedupFilter, err := etl.MarshalOneShotFilter(&OptimizedUserFilter{IDs: []string{"user01", "user02"}})
-		require.NoError(t, err)
-		require.NoError(t, dedupPipeline.EnqueueOneShot(ctx, &etl.Cursor{}, dedupFilter))
-
-		// The unique id is derived from the filter bytes.
-		var uniqueID string
-		require.NoError(t, pipelineSQLDB.QueryRowContext(ctx,
-			`SELECT unique_id FROM goque_jobs WHERE queue = $1`, dedupQueue).Scan(&uniqueID))
-		assert.Equal(t, etl.OneShotUniqueID(dedupFilter), uniqueID)
-
-		// An identical filter is rejected while the first task is in flight...
-		err = dedupPipeline.EnqueueOneShot(ctx, &etl.Cursor{}, dedupFilter)
-		require.Error(t, err, "identical in-flight task must be rejected")
-		assert.ErrorIs(t, err, que.ErrViolateUniqueConstraint)
-
-		// ...while a different filter coexists.
-		otherFilter, err := etl.MarshalOneShotFilter(&OptimizedUserFilter{IDs: []string{"user03"}})
-		require.NoError(t, err)
-		require.NoError(t, dedupPipeline.EnqueueOneShot(ctx, &etl.Cursor{}, otherFilter))
-		assert.Equal(t, 2, countRows(dedupQueue))
-
-		// Clean up: this queue has no worker to drain it.
-		_, err = pipelineSQLDB.ExecContext(ctx, `DELETE FROM goque_jobs WHERE queue = $1`, dedupQueue)
-		require.NoError(t, err)
-	})
-
 	t.Run("failure retries then expires without successor", func(t *testing.T) {
 		const failingQueue = "oneshot_failing_etl"
 
 		failing := &failingSource{}
+		fastRetry := &que.RetryPolicy{
+			InitialInterval:        200 * time.Millisecond,
+			MaxInterval:            time.Second,
+			NextIntervalMultiplier: 1,
+			MaxRetryCount:          1,
+		}
 		failingPipeline, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
-			Source:    failing,
-			QueueDB:   pipelineSQLDB,
-			QueueName: failingQueue,
-			PageSize:  4,
-			OneShot:   true,
-			RetryPolicy: &que.RetryPolicy{
-				InitialInterval:        200 * time.Millisecond,
-				MaxInterval:            time.Second,
-				NextIntervalMultiplier: 1,
-				MaxRetryCount:          1,
-			},
+			Source:      failing,
+			QueueDB:     pipelineSQLDB,
+			QueueName:   failingQueue,
+			PageSize:    4,
+			OneShot:     true,
+			RetryPolicy: fastRetry,
 		})
 		require.NoError(t, err)
 
@@ -410,49 +367,50 @@ func TestOneShotPipeline(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { _ = failingController.Stop(context.Background()) }()
 
-		failingFilter, err := etl.MarshalOneShotFilter(&OptimizedUserFilter{IDs: []string{"user01"}})
-		require.NoError(t, err)
-		require.NoError(t, failingPipeline.EnqueueOneShot(ctx, &etl.Cursor{}, failingFilter))
+		failingSQL := buildOneShotSQL(t, failingQueue, OptimizedUserFilter{IDs: []string{"user01"}}, fastRetry)
+		require.NoError(t, execSQL(failingSQL))
 
-		// While the task is in flight (pending or retrying), an identical
-		// enqueue is rejected by the filter-derived unique id.
-		err = failingPipeline.EnqueueOneShot(ctx, &etl.Cursor{}, failingFilter)
+		// While the task is in flight (pending or retrying), executing the
+		// same statement again is rejected by the filter-derived unique id.
+		err = execSQL(failingSQL)
 		require.Error(t, err, "identical in-flight task must be rejected")
-		assert.ErrorIs(t, err, que.ErrViolateUniqueConstraint)
+		assert.Contains(t, err.Error(), "goque_jobs_unique_uidx")
 
 		require.Eventually(t, func() bool { return countExpired(failingQueue) == 1 },
 			60*time.Second, 200*time.Millisecond, "exhausted one-shot job should be expired")
 		assert.Equal(t, 1, countRows(failingQueue), "no successor job may be enqueued on failure")
 		assert.Equal(t, 2, failing.callCount(), "MaxRetryCount 1 means the initial attempt plus one retry")
 
-		// Expiry released the unique id: the same filter can be fired again.
-		require.NoError(t, failingPipeline.EnqueueOneShot(ctx, &etl.Cursor{}, failingFilter))
+		// Expiry released the unique id: the same statement is accepted again.
+		require.NoError(t, execSQL(failingSQL))
 		require.Eventually(t, func() bool { return countExpired(failingQueue) == 2 },
 			60*time.Second, 200*time.Millisecond, "re-fired task should run and expire again")
 	})
 
-	t.Run("enqueue validation", func(t *testing.T) {
-		// EnqueueOneShot is rejected on an incremental pipeline.
-		chain, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
-			Source:                  syncer,
-			QueueDB:                 pipelineSQLDB,
-			QueueName:               "validation_chain_etl",
-			PageSize:                10,
-			Interval:                3 * time.Second,
-			ConsistencyDelay:        1 * time.Second,
-			RetryPolicy:             bus.DefaultRetryPolicyFactory(),
-			CircuitBreakerThreshold: 3,
-			CircuitBreakerCooldown:  60 * time.Second,
+	t.Run("builder and filter validation", func(t *testing.T) {
+		// BuildOneShotJobSQL validates its inputs.
+		_, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
+			QueueName:   "validation_etl",
+			Filter:      OptimizedUserFilter{IDs: []string{"user01"}},
+			RetryPolicy: bus.DefaultRetryPolicyFactory(),
 		})
-		require.NoError(t, err)
-		assert.Error(t, chain.EnqueueOneShot(ctx, &etl.Cursor{}, filter),
-			"EnqueueOneShot must be rejected on an incremental pipeline")
+		assert.Error(t, err, "missing PageSize must be rejected")
 
-		// An empty or invalid filter can never mean "sync everything".
-		assert.Error(t, oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, nil),
-			"empty filter must be rejected")
-		assert.Error(t, oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, json.RawMessage(`{`)),
-			"invalid JSON filter must be rejected")
+		_, err = etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
+			QueueName: "validation_etl",
+			PageSize:  4,
+			Filter:    OptimizedUserFilter{IDs: []string{"user01"}},
+		})
+		assert.Error(t, err, "missing RetryPolicy must be rejected")
+
+		// A typed nil pointer filter would marshal to JSON null; reject it.
+		_, err = etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, *OptimizedUserFilter]{
+			QueueName:   "validation_etl",
+			PageSize:    4,
+			Filter:      nil,
+			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+		})
+		assert.Error(t, err, "nil filter must be rejected")
 
 		// UnmarshalOneShotFilter rejects unknown fields so a typo fails loudly.
 		_, err = etl.UnmarshalOneShotFilter[OptimizedUserFilter](json.RawMessage(`{"idz":["user01"]}`))
@@ -461,9 +419,5 @@ func TestOneShotPipeline(t *testing.T) {
 		// ...and rejects trailing data after the filter document.
 		_, err = etl.UnmarshalOneShotFilter[OptimizedUserFilter](json.RawMessage(`{"ids":["user01"]}{"junk":1}`))
 		assert.Error(t, err, "trailing data after the filter must be rejected")
-
-		// A typed nil pointer would marshal to JSON null; reject it.
-		_, err = etl.MarshalOneShotFilter((*OptimizedUserFilter)(nil))
-		assert.Error(t, err, "nil pointer filter must be rejected")
 	})
 }
