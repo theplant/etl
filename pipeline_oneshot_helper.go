@@ -10,6 +10,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/qor5/go-que"
+	"github.com/samber/lo"
 )
 
 // MarshalOneShotFilter encodes a source-defined filter struct into the opaque form
@@ -77,7 +78,9 @@ type OneShotJobSQLInput[T any, F any] struct {
 	// PageSize should match the pipeline's PageSize.
 	PageSize int
 	// SeedCursor is the pagination start, usually the cursor zero value
-	// (e.g. &etl.Cursor{}).
+	// (e.g. &etl.Cursor{}). Must not be nil: a nil cursor would render
+	// "After":null into the job document, and its meaning would then depend
+	// entirely on the Source's nil handling.
 	SeedCursor T
 	// Filter selects the records to sync.
 	Filter F
@@ -104,6 +107,9 @@ func BuildOneShotJobSQL[T any, F any](in *OneShotJobSQLInput[T, F]) (string, err
 	}
 	if in.RetryPolicy == nil {
 		return "", errors.New("RetryPolicy is required")
+	}
+	if lo.IsNil(in.SeedCursor) {
+		return "", errors.New("SeedCursor is required; use the cursor zero value (e.g. &etl.Cursor{})")
 	}
 
 	filter, err := MarshalOneShotFilter(in.Filter)

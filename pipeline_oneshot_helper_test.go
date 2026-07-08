@@ -172,6 +172,14 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		})
 		assert.Error(t, err, "missing RetryPolicy must be rejected")
 
+		_, err = etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, helperFilter]{
+			QueueName:   "q1",
+			PageSize:    4,
+			Filter:      helperFilter{IDs: []string{"a"}},
+			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+		})
+		assert.Error(t, err, "nil SeedCursor must be rejected")
+
 		_, err = etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, *helperFilter]{
 			QueueName:   "q1",
 			PageSize:    4,
