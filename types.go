@@ -2,6 +2,7 @@ package etl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -31,6 +32,16 @@ type ExtractRequest[T any] struct {
 	First    int
 	FromAt   time.Time // time interval start (inclusive), never zero for consistency
 	BeforeAt time.Time // time interval end (exclusive), never zero for consistency
+
+	// OneShotFilter carries the targeting criteria of a one-shot job (see
+	// OneShotPipeline). It is opaque to the framework: the enqueuer
+	// (OneShotPipeline.Enqueue) provides it and the Source interprets it,
+	// replacing the FromAt/BeforeAt time-window predicate with its own
+	// filter predicate — use UnmarshalOneShotFilter to decode it strictly.
+	// It stays constant across all pages of one one-shot task while After
+	// advances. It is empty on incremental Pipeline jobs; conversely,
+	// FromAt/BeforeAt are zero on one-shot jobs.
+	OneShotFilter json.RawMessage `json:",omitempty"`
 }
 
 // String generates a deterministic string representation for the ExtractRequest

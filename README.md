@@ -210,6 +210,73 @@ Prevents resource exhaustion during persistent failures:
 
 ## Advanced Usage
 
+### One-Shot Targeted Sync
+
+Besides the incremental `Pipeline`, a `OneShotPipeline` syncs only specific
+records on demand (e.g. re-sync a handful of IDs after a data incident)
+without touching the incremental pipeline:
+
+```go
+// Define your filter schema; only your Source knows it.
+type MyFilter struct {
+    IDs []string `json:"ids,omitempty"`
+}
+
+// A dedicated one-shot pipeline on its own queue, sharing the same Source.
+// There is no Interval/ConsistencyDelay (no time window) and no circuit
+// breaker (a one-shot task is finite: it retries per RetryPolicy and expires
+// when exhausted).
+oneShot, err := etl.NewOneShotPipeline[*etl.Cursor, MyFilter](&etl.OneShotPipelineConfig[*etl.Cursor]{
+    Source:      source, // same Source as the incremental pipeline
+    QueueDB:     queueDB,
+    QueueName:   "USER_SYNC_ONESHOT", // separate from the incremental queue
+    PageSize:    500,
+    RetryPolicy: bus.DefaultRetryPolicyFactory(),
+})
+
+// Start only boots the worker — no seed job is enqueued.
+controller, err := oneShot.Start(ctx)
+
+// Submit a targeted task, typed.
+err = oneShot.Enqueue(ctx, &etl.Cursor{}, MyFilter{IDs: []string{"user1", "user2"}})
+```
+
+The Source reads `req.OneShotFilter` in `Extract` and replaces the
+time-window predicate with its own criteria (keyset pagination via
+`req.After` still applies):
+
+```go
+func (s *MySource) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
+    // ...
+    if req.OneShotFilter != nil {
+        filter, err := etl.UnmarshalOneShotFilter[MyFilter](req.OneShotFilter) // rejects unknown fields
+        if err != nil {
+            return nil, err
+        }
+        query += ` AND id IN ?`
+        args = append(args, filter.IDs)
+    } else {
+        query += ` AND updated_at >= ? AND updated_at < ?`
+        args = append(args, req.FromAt, req.BeforeAt)
+    }
+    // ... transform / target exactly as in incremental mode
+}
+```
+
+Semantics:
+
+- On success the job is destroyed; large filtered sets page through
+  next-page jobs carrying the same `OneShotFilter`, then the task ends. No
+  time-window successor is ever enqueued.
+- On failure the job retries per `RetryPolicy` and is expired (with the
+  error recorded) when retries are exhausted. The circuit breaker only
+  exists on the incremental `Pipeline`.
+- One-shot jobs carry no `UniqueID`, so multiple targeted tasks can coexist.
+- A job whose args do not match the queue's pipeline kind (e.g. a filtered
+  job inserted into an incremental queue) is expired immediately.
+- Jobs can also be submitted by inserting a row into `goque_jobs` directly;
+  the args are the JSON-serialized `ExtractRequest` including `OneShotFilter`.
+
 ### Custom Cursor Types
 
 Use your own cursor type for specific tracking needs:

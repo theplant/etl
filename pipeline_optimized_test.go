@@ -38,6 +38,15 @@ type OptimizedUser struct {
 
 // ====== Optimized Source Implementation ======
 
+// OptimizedUserFilter is the source-defined criteria document for one-shot
+// targeted sync (see OneShotPipeline). It travels opaquely inside
+// ExtractRequest.OneShotFilter; only this Source knows its schema. Extend it
+// with new fields (emails, time range, ...) to support more targeting
+// criteria.
+type OptimizedUserFilter struct {
+	IDs []string `json:"ids,omitempty"`
+}
+
 type optimizedIdentitySyncer struct {
 	sourceDB *gorm.DB
 	targetDB *gorm.DB
@@ -76,8 +85,23 @@ func (s *optimizedIdentitySyncer) Extract(ctx context.Context, req *etl.ExtractR
 		args = append(args, cursor.At, cursor.ID)
 	}
 
-	usersQuery += ` AND updated_at >= ? AND updated_at < ?`
-	args = append(args, req.FromAt, req.BeforeAt)
+	if req.OneShotFilter != nil {
+		// One-shot targeted request: the caller-provided filter replaces the
+		// incremental time window as the set predicate. Keyset pagination
+		// (After cursor) still applies on top of it.
+		filter, err := etl.UnmarshalOneShotFilter[OptimizedUserFilter](req.OneShotFilter)
+		if err != nil {
+			return nil, err
+		}
+		if len(filter.IDs) == 0 {
+			return nil, errors.New("filter must specify at least one id")
+		}
+		usersQuery += ` AND id IN ?`
+		args = append(args, filter.IDs)
+	} else {
+		usersQuery += ` AND updated_at >= ? AND updated_at < ?`
+		args = append(args, req.FromAt, req.BeforeAt)
+	}
 
 	usersQuery += ` ORDER BY updated_at ASC, id ASC LIMIT ?`
 	args = append(args, req.First+1)
