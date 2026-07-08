@@ -36,11 +36,11 @@ type PipelineConfig[T any] struct {
 	// OneShot switches the pipeline from the incremental chain mode to the
 	// targeted one-shot mode:
 	//   - Start does not enqueue a seed job; jobs are submitted explicitly
-	//     via EnqueueOneShot, each carrying a Source-defined Filter.
-	//   - Every job must carry a Filter; the Source uses it instead of the
+	//     via EnqueueOneShot, each carrying a Source-defined OneShotFilter.
+	//   - Every job must carry a OneShotFilter; the Source uses it instead of the
 	//     FromAt/BeforeAt time window to select records.
 	//   - On success the job is destroyed. If the filtered set spans multiple
-	//     pages, the next page is enqueued with the same Filter and an
+	//     pages, the next page is enqueued with the same OneShotFilter and an
 	//     advanced cursor; the task ends when the last page completes. No
 	//     time-window successor is ever enqueued.
 	//   - On failure the job is retried per RetryPolicy and expired when
@@ -283,7 +283,7 @@ func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) (xerr error) {
 	// manually inserted into an incremental queue, or vice versa) cannot be
 	// fixed by retrying, so expire it right away instead of retrying or,
 	// worse, silently misinterpreting it.
-	if s.OneShot != (len(req.Filter) > 0) {
+	if s.OneShot != (len(req.OneShotFilter) > 0) {
 		spanKVs["mode_mismatch"] = true
 		return s.expireMismatchedJob(ctx, job)
 	}
@@ -325,8 +325,8 @@ func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) (re
 	spanKVs["req.first"] = req.First
 	spanKVs["req.from_at"] = req.FromAt.Format(time.RFC3339)
 	spanKVs["req.before_at"] = req.BeforeAt.Format(time.RFC3339)
-	if req.Filter != nil {
-		spanKVs["req.filter"] = string(req.Filter)
+	if req.OneShotFilter != nil {
+		spanKVs["req.one_shot_filter"] = string(req.OneShotFilter)
 	}
 
 	resp, err := s.Source.Extract(ctx, req)
@@ -545,7 +545,7 @@ func (s *Pipeline[T]) handleSuccess(ctx context.Context, job que.Job, req *Extra
 
 // processOneShot handles a targeted one-shot job. On success the job is
 // destroyed; if the filtered set spans multiple pages, the next page is
-// enqueued carrying the same Filter with an advanced cursor — the task ends
+// enqueued carrying the same OneShotFilter with an advanced cursor — the task ends
 // when the last page completes. On failure the error is simply returned:
 // go-que retries per the job's RetryPolicy (restarting from this page's
 // cursor — CommitFunc MERGEs are expected to be idempotent, so replays are
@@ -578,9 +578,9 @@ func (s *Pipeline[T]) processOneShot(ctx context.Context, job que.Job, req *Extr
 
 		if result.HasNextPage {
 			nextReq := &ExtractRequest[T]{
-				After:  result.NewCursor,
-				First:  s.PageSize,
-				Filter: req.Filter,
+				After:         result.NewCursor,
+				First:         s.PageSize,
+				OneShotFilter: req.OneShotFilter,
 			}
 			if err := s.enqueueOneShotJob(ctx, tx, nextReq, time.Now()); err != nil {
 				return errors.Wrap(err, "failed to enqueue next page one-shot job")
@@ -597,10 +597,10 @@ func (s *Pipeline[T]) processOneShot(ctx context.Context, job que.Job, req *Extr
 // time-window math and sets no UniqueID, so multiple one-shot jobs can
 // coexist in the same queue.
 func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *ExtractRequest[T], runAt time.Time) error {
-	if len(req.Filter) == 0 {
+	if len(req.OneShotFilter) == 0 {
 		return errors.New("filter is required for one-shot job")
 	}
-	if !json.Valid(req.Filter) {
+	if !json.Valid(req.OneShotFilter) {
 		return errors.New("filter must be valid JSON")
 	}
 
@@ -624,7 +624,7 @@ func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *Ex
 }
 
 // EnqueueOneShot submits a targeted one-shot job that syncs only the records
-// matched by filter (a Source-defined criteria document, see MarshalFilter).
+// matched by filter (a Source-defined criteria document, see MarshalOneShotFilter).
 // Only valid on OneShot pipelines. seedCursor is the pagination start,
 // usually the cursor zero value.
 func (s *Pipeline[T]) EnqueueOneShot(ctx context.Context, seedCursor T, filter json.RawMessage) error {
@@ -633,9 +633,9 @@ func (s *Pipeline[T]) EnqueueOneShot(ctx context.Context, seedCursor T, filter j
 	}
 
 	req := &ExtractRequest[T]{
-		After:  seedCursor,
-		First:  s.PageSize,
-		Filter: filter,
+		After:         seedCursor,
+		First:         s.PageSize,
+		OneShotFilter: filter,
 	}
 
 	return sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {

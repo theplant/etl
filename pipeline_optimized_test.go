@@ -40,7 +40,7 @@ type OptimizedUser struct {
 
 // OptimizedUserFilter is the source-defined criteria document for one-shot
 // targeted sync (see PipelineConfig.OneShot). It travels opaquely inside
-// ExtractRequest.Filter; only this Source knows its schema. Extend it with
+// ExtractRequest.OneShotFilter; only this Source knows its schema. Extend it with
 // new fields (emails, time range, ...) to support more targeting criteria.
 type OptimizedUserFilter struct {
 	IDs []string `json:"ids,omitempty"`
@@ -84,11 +84,11 @@ func (s *optimizedIdentitySyncer) Extract(ctx context.Context, req *etl.ExtractR
 		args = append(args, cursor.At, cursor.ID)
 	}
 
-	if req.Filter != nil {
+	if req.OneShotFilter != nil {
 		// One-shot targeted request: the caller-provided filter replaces the
 		// incremental time window as the set predicate. Keyset pagination
 		// (After cursor) still applies on top of it.
-		filter, err := etl.UnmarshalFilter[OptimizedUserFilter](req.Filter)
+		filter, err := etl.UnmarshalOneShotFilter[OptimizedUserFilter](req.OneShotFilter)
 		if err != nil {
 			return nil, err
 		}

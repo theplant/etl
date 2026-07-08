@@ -232,19 +232,19 @@ oneShot, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
 controller, err := oneShot.Start(ctx, &etl.Cursor{})
 
 // Submit a targeted task. The filter schema is defined by your Source.
-filter, _ := etl.MarshalFilter(&MyFilter{IDs: []string{"user1", "user2"}})
+filter, _ := etl.MarshalOneShotFilter(&MyFilter{IDs: []string{"user1", "user2"}})
 err = oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, filter)
 ```
 
-The Source reads `req.Filter` in `Extract` and replaces the time-window
+The Source reads `req.OneShotFilter` in `Extract` and replaces the time-window
 predicate with its own criteria (keyset pagination via `req.After` still
 applies):
 
 ```go
 func (s *MySource) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
     // ...
-    if req.Filter != nil {
-        filter, err := etl.UnmarshalFilter[MyFilter](req.Filter) // rejects unknown fields
+    if req.OneShotFilter != nil {
+        filter, err := etl.UnmarshalOneShotFilter[MyFilter](req.OneShotFilter) // rejects unknown fields
         if err != nil {
             return nil, err
         }
@@ -261,7 +261,7 @@ func (s *MySource) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cur
 Semantics:
 
 - On success the job is destroyed; large filtered sets page through
-  next-page jobs carrying the same `Filter`, then the task ends. No
+  next-page jobs carrying the same `OneShotFilter`, then the task ends. No
   time-window successor is ever enqueued.
 - On failure the job retries per `RetryPolicy` and is expired (with the
   error recorded) when retries are exhausted. The circuit breaker only
@@ -270,7 +270,7 @@ Semantics:
 - A job whose args do not match the pipeline's mode (e.g. a filtered job
   inserted into an incremental queue) is expired immediately.
 - Jobs can also be submitted by inserting a row into `goque_jobs` directly;
-  the args are the JSON-serialized `ExtractRequest` including `Filter`.
+  the args are the JSON-serialized `ExtractRequest` including `OneShotFilter`.
 
 ### Custom Cursor Types
 

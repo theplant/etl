@@ -162,7 +162,7 @@ func TestOneShotPipeline(t *testing.T) {
 	for i := 1; i <= 9; i++ {
 		targetIDs = append(targetIDs, fmt.Sprintf("user%02d", i))
 	}
-	filter, err := etl.MarshalFilter(&OptimizedUserFilter{IDs: targetIDs})
+	filter, err := etl.MarshalOneShotFilter(&OptimizedUserFilter{IDs: targetIDs})
 	require.NoError(t, err)
 
 	t.Run("targeted sync of 9 ids", func(t *testing.T) {
@@ -197,7 +197,7 @@ func TestOneShotPipeline(t *testing.T) {
 		reqs := source.requests()
 		require.Len(t, reqs, 3, "9 ids with PageSize 4 should extract in 3 pages")
 		for i, req := range reqs {
-			assert.JSONEq(t, string(filter), string(req.Filter), "page %d should carry the original filter", i+1)
+			assert.JSONEq(t, string(filter), string(req.OneShotFilter), "page %d should carry the original filter", i+1)
 			assert.True(t, req.FromAt.IsZero(), "one-shot requests must not carry a time window")
 			assert.True(t, req.BeforeAt.IsZero(), "one-shot requests must not carry a time window")
 		}
@@ -234,7 +234,7 @@ func TestOneShotPipeline(t *testing.T) {
 		}, 60*time.Second, 500*time.Millisecond, "incremental chain should sync all users")
 
 		// Fire another one-shot while the chain is live.
-		reFilter, err := etl.MarshalFilter(&OptimizedUserFilter{IDs: []string{"user01"}})
+		reFilter, err := etl.MarshalOneShotFilter(&OptimizedUserFilter{IDs: []string{"user01"}})
 		require.NoError(t, err)
 		require.NoError(t, oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, reFilter))
 		require.Eventually(t, func() bool { return countRows(oneShotQueue) == 0 },
@@ -250,7 +250,7 @@ func TestOneShotPipeline(t *testing.T) {
 			`INSERT INTO goque_jobs(queue, run_at, args, retry_policy, unique_id, unique_lifecycle)
 			 VALUES ($1, now(), $2, '{}', NULL, 0)`,
 			incrementalQueue,
-			`[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":10,"Filter":{"ids":["user01"]}}]`)
+			`[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":10,"OneShotFilter":{"ids":["user01"]}}]`)
 		require.NoError(t, err)
 		require.Eventually(t, func() bool { return countExpired(incrementalQueue) == 1 },
 			60*time.Second, 200*time.Millisecond, "filtered job in incremental queue should be expired")
@@ -291,7 +291,7 @@ func TestOneShotPipeline(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { _ = failingController.Stop(context.Background()) }()
 
-		failingFilter, err := etl.MarshalFilter(&OptimizedUserFilter{IDs: []string{"user01"}})
+		failingFilter, err := etl.MarshalOneShotFilter(&OptimizedUserFilter{IDs: []string{"user01"}})
 		require.NoError(t, err)
 		require.NoError(t, failingPipeline.EnqueueOneShot(ctx, &etl.Cursor{}, failingFilter))
 
@@ -324,8 +324,8 @@ func TestOneShotPipeline(t *testing.T) {
 		assert.Error(t, oneShot.EnqueueOneShot(ctx, &etl.Cursor{}, json.RawMessage(`{`)),
 			"invalid JSON filter must be rejected")
 
-		// UnmarshalFilter rejects unknown fields so a typo fails loudly.
-		_, err = etl.UnmarshalFilter[OptimizedUserFilter](json.RawMessage(`{"idz":["user01"]}`))
+		// UnmarshalOneShotFilter rejects unknown fields so a typo fails loudly.
+		_, err = etl.UnmarshalOneShotFilter[OptimizedUserFilter](json.RawMessage(`{"idz":["user01"]}`))
 		assert.Error(t, err, "unknown filter fields must be rejected")
 	})
 }
