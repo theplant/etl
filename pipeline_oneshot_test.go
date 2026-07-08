@@ -3,7 +3,6 @@ package etl_test
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -461,38 +460,5 @@ func TestOneShotPipeline(t *testing.T) {
 	})
 }
 
-// TestOneShotHelperValidation covers the pure input validation of the
-// one-shot helpers — no databases involved.
-func TestOneShotHelperValidation(t *testing.T) {
-	// BuildOneShotJobSQL validates its inputs.
-	_, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
-		QueueName:   "validation_etl",
-		Filter:      OptimizedUserFilter{IDs: []string{"user01"}},
-		RetryPolicy: bus.DefaultRetryPolicyFactory(),
-	})
-	assert.Error(t, err, "missing PageSize must be rejected")
-
-	_, err = etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
-		QueueName: "validation_etl",
-		PageSize:  4,
-		Filter:    OptimizedUserFilter{IDs: []string{"user01"}},
-	})
-	assert.Error(t, err, "missing RetryPolicy must be rejected")
-
-	// A typed nil pointer filter would marshal to JSON null; reject it.
-	_, err = etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, *OptimizedUserFilter]{
-		QueueName:   "validation_etl",
-		PageSize:    4,
-		Filter:      nil,
-		RetryPolicy: bus.DefaultRetryPolicyFactory(),
-	})
-	assert.Error(t, err, "nil filter must be rejected")
-
-	// UnmarshalOneShotFilter rejects unknown fields so a typo fails loudly...
-	_, err = etl.UnmarshalOneShotFilter[OptimizedUserFilter](json.RawMessage(`{"idz":["user01"]}`))
-	assert.Error(t, err, "unknown filter fields must be rejected")
-
-	// ...and rejects trailing data after the filter document.
-	_, err = etl.UnmarshalOneShotFilter[OptimizedUserFilter](json.RawMessage(`{"ids":["user01"]}{"junk":1}`))
-	assert.Error(t, err, "trailing data after the filter must be rejected")
-}
+// Pure input validation of the one-shot helpers lives in
+// pipeline_oneshot_helper_test.go — no databases involved there.
