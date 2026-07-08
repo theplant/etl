@@ -347,8 +347,9 @@ func TestOneShotPipeline(t *testing.T) {
 	t.Run("generated SQL carries dedup id and survives quoting", func(t *testing.T) {
 		const queue = "oneshot_sqldoc_etl"
 		// No worker consumes this queue, so the in-flight window is
-		// deterministic. The id with a single quote exercises literal escaping.
-		quotedFilter := OptimizedUserFilter{IDs: []string{"o'brien", "user02"}}
+		// deterministic. The ids exercise literal escaping: a single quote
+		// (doubled) and a backslash (E'...' escape-string form).
+		quotedFilter := OptimizedUserFilter{IDs: []string{"o'brien", `back\slash`, "user02"}}
 		sqlText := env.buildSQL(t, queue, quotedFilter, nil)
 		require.NoError(t, env.exec(sqlText))
 

@@ -118,11 +118,27 @@ func BuildOneShotJobSQL[T any, F any](in *OneShotJobSQLInput[T, F]) (string, err
 		return "", errors.Wrap(err, "failed to marshal retry policy")
 	}
 
-	// PostgreSQL string literals: escape by doubling single quotes.
+	// quote renders s as a PostgreSQL string literal: single quotes are
+	// doubled, and when s contains backslashes the escape-string form E'...'
+	// is used with backslashes doubled as well — the literal then parses
+	// identically regardless of the server's standard_conforming_strings
+	// setting (same approach as pq.QuoteLiteral).
 	quote := func(s string) string {
-		return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+		quoted := strings.ReplaceAll(s, "'", "''")
+		if strings.Contains(s, `\`) {
+			return " E'" + strings.ReplaceAll(quoted, `\`, `\\`) + "'"
+		}
+		return "'" + quoted + "'"
 	}
 
+	// Values are deliberately rendered into the SQL text: the output is a
+	// standalone document executed later by an operator, so no parameter
+	// binding channel exists at generation time. Every injection-shaped
+	// failure is closed at the interpolation points instead: all string
+	// values go through quote above, the unique id's alphabet is hex-only,
+	// unique_lifecycle is rendered as an integer, and no identifiers are
+	// interpolated. Round-trip byte-exactness (quotes and backslashes in the
+	// payload included) is pinned by tests.
 	sql := fmt.Sprintf(
 		`INSERT INTO goque_jobs (queue, run_at, args, retry_policy, unique_id, unique_lifecycle)
 VALUES (%s, now(), %s, %s, %s, %d);`,
