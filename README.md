@@ -274,11 +274,13 @@ Semantics:
   coexist.
 - A job whose args do not match the pipeline's mode (e.g. a filtered job
   inserted into an incremental queue) is expired immediately.
-- Jobs can also be submitted by inserting a row into `goque_jobs` directly;
-  the args are the JSON-serialized `ExtractRequest` including `OneShotFilter`.
-  Set a human-readable `unique_id` (e.g. a ticket number like
-  `etl_oneshot_KGM-1234`) with `unique_lifecycle = 3` (Lockable) so
-  accidental duplicate inserts are rejected too.
+- The usual production trigger is a SQL handoff to an operator rather than a
+  code call: `BuildOneShotJobSQL` renders a ready-to-run `goque_jobs` INSERT
+  from a typed filter — same args document, same filter-derived `unique_id`
+  (so double-executing the statement is rejected) and same Lockable lifecycle
+  as `EnqueueOneShot`. Hand-written inserts remain possible; give them a
+  human-readable `unique_id` (e.g. a ticket number like
+  `etl_oneshot_KGM-1234`) with `unique_lifecycle = 3`.
 
 ### Custom Cursor Types
 

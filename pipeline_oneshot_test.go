@@ -212,6 +212,78 @@ func TestOneShotPipeline(t *testing.T) {
 			60*time.Second, 200*time.Millisecond, "re-fired task should drain again")
 	})
 
+	t.Run("generated SQL insert drives the same sync", func(t *testing.T) {
+		// The production trigger path: render an INSERT statement from a
+		// typed filter and execute it verbatim (as an operator would),
+		// without going through any Go API.
+		sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
+			QueueName:   oneShotQueue,
+			PageSize:    4,
+			SeedCursor:  &etl.Cursor{},
+			Filter:      OptimizedUserFilter{IDs: []string{"user10"}},
+			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+		})
+		require.NoError(t, err)
+
+		_, err = pipelineSQLDB.ExecContext(ctx, sqlText)
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool { return countRows(oneShotQueue) == 0 },
+			60*time.Second, 200*time.Millisecond, "SQL-inserted task should drain its queue")
+
+		var identity Identity
+		require.NoError(t, targetDB.Where("id = ?", "user10").First(&identity).Error,
+			"the SQL-inserted task should have synced user10")
+		assert.Equal(t, "name_10", identity.Username)
+	})
+
+	t.Run("generated SQL carries dedup id and survives quoting", func(t *testing.T) {
+		const sqlQueue = "oneshot_sql_etl"
+
+		// No worker consumes this queue, so the in-flight window is
+		// deterministic. The id with a single quote exercises literal escaping.
+		quotedFilter := OptimizedUserFilter{IDs: []string{"o'brien", "user02"}}
+		sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
+			QueueName:   sqlQueue,
+			PageSize:    4,
+			SeedCursor:  &etl.Cursor{},
+			Filter:      quotedFilter,
+			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+		})
+		require.NoError(t, err)
+
+		_, err = pipelineSQLDB.ExecContext(ctx, sqlText)
+		require.NoError(t, err)
+
+		// The stored row matches what EnqueueOneShot would have produced.
+		var argsJSON, uniqueID string
+		var lifecycle int
+		require.NoError(t, pipelineSQLDB.QueryRowContext(ctx,
+			`SELECT args, unique_id, unique_lifecycle FROM goque_jobs WHERE queue = $1`, sqlQueue).
+			Scan(&argsJSON, &uniqueID, &lifecycle))
+
+		expectedFilter, err := etl.MarshalOneShotFilter(quotedFilter)
+		require.NoError(t, err)
+		assert.Equal(t, etl.OneShotUniqueID(expectedFilter), uniqueID)
+		assert.Equal(t, int(que.Lockable), lifecycle)
+
+		var req etl.ExtractRequest[*etl.Cursor]
+		_, err = que.ParseArgs([]byte(argsJSON), &req)
+		require.NoError(t, err)
+		assert.Equal(t, 4, req.First)
+		assert.JSONEq(t, string(expectedFilter), string(req.OneShotFilter),
+			"filter must survive SQL literal quoting byte-exactly")
+
+		// Executing the same generated SQL again while the task is in flight
+		// violates the unique constraint — the manual path gets the same
+		// duplicate-insert protection as EnqueueOneShot.
+		_, err = pipelineSQLDB.ExecContext(ctx, sqlText)
+		require.Error(t, err, "duplicate execution of the generated SQL must be rejected")
+
+		_, err = pipelineSQLDB.ExecContext(ctx, `DELETE FROM goque_jobs WHERE queue = $1`, sqlQueue)
+		require.NoError(t, err)
+	})
+
 	t.Run("incremental chain runs unaffected alongside", func(t *testing.T) {
 		chain, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
 			Source:                  syncer,
