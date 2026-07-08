@@ -3,6 +3,7 @@ package etl
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,24 @@ type PipelineConfig[T any] struct {
 	PageSize         int
 	Interval         time.Duration
 	ConsistencyDelay time.Duration
+
+	// OneShot switches the pipeline from the incremental chain mode to the
+	// targeted one-shot mode:
+	//   - Start does not enqueue a seed job; jobs are submitted explicitly
+	//     via EnqueueOneShot, each carrying a Source-defined Filter.
+	//   - Every job must carry a Filter; the Source uses it instead of the
+	//     FromAt/BeforeAt time window to select records.
+	//   - On success the job is destroyed. If the filtered set spans multiple
+	//     pages, the next page is enqueued with the same Filter and an
+	//     advanced cursor; the task ends when the last page completes. No
+	//     time-window successor is ever enqueued.
+	//   - On failure the job is retried per RetryPolicy and expired when
+	//     retries are exhausted. The circuit breaker is not involved.
+	// Interval, ConsistencyDelay, CircuitBreakerThreshold and
+	// CircuitBreakerCooldown are unused in this mode.
+	// Run a one-shot pipeline on its own QueueName (e.g. "<name>_ONESHOT"),
+	// separate from the incremental pipeline's queue.
+	OneShot bool
 
 	// Retry and circuit breaker configuration
 	RetryPolicy             *que.RetryPolicy
@@ -63,24 +82,29 @@ func (c *PipelineConfig[T]) Validate() error {
 		return errors.New("PageSize must be greater than 0")
 	}
 
-	if c.Interval <= 0 {
-		return errors.New("Interval must be greater than 0")
-	}
-
-	if c.ConsistencyDelay < 0 {
-		return errors.New("ConsistencyDelay must be greater than or equal to 0")
-	}
-
 	if c.RetryPolicy == nil {
 		return errors.New("RetryPolicy is required")
 	}
 
-	if c.CircuitBreakerThreshold <= 0 {
-		return errors.New("CircuitBreakerThreshold must be greater than 0")
-	}
+	// The remaining parameters only drive the incremental chain mode
+	// (time-window scheduling and circuit breaker) and are unused in
+	// one-shot mode.
+	if !c.OneShot {
+		if c.Interval <= 0 {
+			return errors.New("Interval must be greater than 0")
+		}
 
-	if c.CircuitBreakerCooldown <= 0 {
-		return errors.New("CircuitBreakerCooldown must be greater than 0")
+		if c.ConsistencyDelay < 0 {
+			return errors.New("ConsistencyDelay must be greater than or equal to 0")
+		}
+
+		if c.CircuitBreakerThreshold <= 0 {
+			return errors.New("CircuitBreakerThreshold must be greater than 0")
+		}
+
+		if c.CircuitBreakerCooldown <= 0 {
+			return errors.New("CircuitBreakerCooldown must be greater than 0")
+		}
 	}
 
 	return nil
@@ -112,10 +136,14 @@ func NewPipeline[T any](conf *PipelineConfig[T]) (*Pipeline[T], error) {
 	}, nil
 }
 
-// Start starts the ETL processing
+// Start starts the ETL processing. For incremental pipelines it also enqueues
+// the seed job; for one-shot pipelines it only starts the worker (seedCursor
+// is unused) — jobs are submitted via EnqueueOneShot.
 func (s *Pipeline[T]) Start(ctx context.Context, seedCursor T) (quex.WorkerController, error) {
-	if err := s.enqueueSeedJob(ctx, seedCursor); err != nil {
-		return nil, err
+	if !s.OneShot {
+		if err := s.enqueueSeedJob(ctx, seedCursor); err != nil {
+			return nil, err
+		}
 	}
 
 	worker, err := quex.StartWorker(ctx, que.WorkerOptions{
@@ -246,14 +274,27 @@ func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) (xerr error) {
 
 	spanKVs["process_job_id"] = job.ID()
 
-	if s.isCircuitBreakerOpen() {
-		spanKVs["circuit_breaker_open"] = true
-		return s.handleCircuitBreakerOpen(ctx, job)
-	}
-
 	var req ExtractRequest[T]
 	if _, err := que.ParseArgs(job.Plan().Args, &req); err != nil {
 		return errors.Wrap(err, "failed to parse ExtractRequest from job args")
+	}
+
+	// A job must match its pipeline's mode. A mismatch (e.g. a filtered job
+	// manually inserted into an incremental queue, or vice versa) cannot be
+	// fixed by retrying, so expire it right away instead of retrying or,
+	// worse, silently misinterpreting it.
+	if s.OneShot != (len(req.Filter) > 0) {
+		spanKVs["mode_mismatch"] = true
+		return s.expireMismatchedJob(ctx, job)
+	}
+
+	if s.OneShot {
+		return s.processOneShot(ctx, job, &req)
+	}
+
+	if s.isCircuitBreakerOpen() {
+		spanKVs["circuit_breaker_open"] = true
+		return s.handleCircuitBreakerOpen(ctx, job, &req)
 	}
 
 	result := s.doProcess(ctx, &req)
@@ -284,6 +325,9 @@ func (s *Pipeline[T]) doProcess(ctx context.Context, req *ExtractRequest[T]) (re
 	spanKVs["req.first"] = req.First
 	spanKVs["req.from_at"] = req.FromAt.Format(time.RFC3339)
 	spanKVs["req.before_at"] = req.BeforeAt.Format(time.RFC3339)
+	if req.Filter != nil {
+		spanKVs["req.filter"] = string(req.Filter)
+	}
 
 	resp, err := s.Source.Extract(ctx, req)
 	if err != nil {
@@ -344,8 +388,26 @@ func (s *Pipeline[T]) calculateCooldownRunAt() time.Time {
 	return lastSkipped.Add(s.CircuitBreakerCooldown)
 }
 
+// expireMismatchedJob permanently fails a job whose args do not match the
+// pipeline's mode.
+func (s *Pipeline[T]) expireMismatchedJob(ctx context.Context, job que.Job) error {
+	var reason error
+	if s.OneShot {
+		reason = errors.New("one-shot pipeline received a job without filter")
+	} else {
+		reason = errors.New("incremental pipeline received a one-shot (filtered) job")
+	}
+	if s.Notifier != nil {
+		s.Notifier.Notify(reason, nil, map[string]any{"queue": s.QueueName, "job_id": job.ID()})
+	}
+	if err := job.Expire(ctx, reason); err != nil {
+		return errors.Wrap(err, "failed to expire mismatched job")
+	}
+	return nil
+}
+
 // handleCircuitBreakerOpen handles the case when circuit breaker is open
-func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job) (xerr error) {
+func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job, req *ExtractRequest[T]) (xerr error) {
 	ctx, span := logtracing.StartSpan(ctx, "etl.handleCircuitBreakerOpen")
 	spanKVs := make(map[string]any)
 	defer func() {
@@ -356,11 +418,6 @@ func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job)
 	}()
 
 	spanKVs["cooldown_duration"] = s.CircuitBreakerCooldown.String()
-
-	var req ExtractRequest[T]
-	if _, err := que.ParseArgs(job.Plan().Args, &req); err != nil {
-		return errors.Wrap(err, "failed to parse request for circuit breaker handling")
-	}
 
 	return sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {
 		job.In(tx)
@@ -374,7 +431,7 @@ func (s *Pipeline[T]) handleCircuitBreakerOpen(ctx context.Context, job que.Job)
 		// Enqueue the same job to run after cooldown
 		nextRunAt := s.calculateCooldownRunAt()
 		spanKVs["next_run_at"] = nextRunAt.Format(time.RFC3339)
-		if err := s.enqueueJob(ctx, tx, &req, nextRunAt); err != nil {
+		if err := s.enqueueJob(ctx, tx, req, nextRunAt); err != nil {
 			return errors.Wrap(err, "failed to enqueue cooldown job")
 		}
 
@@ -483,6 +540,106 @@ func (s *Pipeline[T]) handleSuccess(ctx context.Context, job que.Job, req *Extra
 		spanKVs["has_next_page"] = result.HasNextPage
 
 		return nil
+	})
+}
+
+// processOneShot handles a targeted one-shot job. On success the job is
+// destroyed; if the filtered set spans multiple pages, the next page is
+// enqueued carrying the same Filter with an advanced cursor — the task ends
+// when the last page completes. On failure the error is simply returned:
+// go-que retries per the job's RetryPolicy (restarting from this page's
+// cursor — CommitFunc MERGEs are expected to be idempotent, so replays are
+// safe) and expires the job when retries are exhausted. No time-window
+// successor is ever enqueued and the circuit breaker is not involved — it
+// protects the incremental chain only.
+func (s *Pipeline[T]) processOneShot(ctx context.Context, job que.Job, req *ExtractRequest[T]) (xerr error) {
+	ctx, span := logtracing.StartSpan(ctx, "etl.processOneShot")
+	spanKVs := make(map[string]any)
+	defer func() {
+		for k, v := range spanKVs {
+			span.AppendKVs(k, v)
+		}
+		logtracing.EndSpan(ctx, xerr)
+	}()
+
+	result := s.doProcess(ctx, req)
+	if result.Error != nil {
+		return result.Error
+	}
+
+	return sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {
+		job.In(tx)
+		defer job.In(nil)
+
+		// Mark current job as completed
+		if err := job.Destroy(ctx); err != nil {
+			return errors.Wrap(err, "failed to mark job as done")
+		}
+
+		if result.HasNextPage {
+			nextReq := &ExtractRequest[T]{
+				After:  result.NewCursor,
+				First:  s.PageSize,
+				Filter: req.Filter,
+			}
+			if err := s.enqueueOneShotJob(ctx, tx, nextReq, time.Now()); err != nil {
+				return errors.Wrap(err, "failed to enqueue next page one-shot job")
+			}
+		}
+
+		spanKVs["job_completed"] = true
+		spanKVs["has_next_page"] = result.HasNextPage
+		return nil
+	})
+}
+
+// enqueueOneShotJob enqueues a one-shot job. Unlike enqueueJob it applies no
+// time-window math and sets no UniqueID, so multiple one-shot jobs can
+// coexist in the same queue.
+func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *ExtractRequest[T], runAt time.Time) error {
+	if len(req.Filter) == 0 {
+		return errors.New("filter is required for one-shot job")
+	}
+	if !json.Valid(req.Filter) {
+		return errors.New("filter must be valid JSON")
+	}
+
+	plan := que.Plan{
+		Queue:       s.QueueName,
+		Args:        que.Args(req),
+		RunAt:       runAt,
+		RetryPolicy: *s.RetryPolicy,
+	}
+
+	jobIDs, err := s.queue.Enqueue(ctx, tx, plan)
+	if err != nil {
+		return errors.Wrap(err, "failed to enqueue one-shot job")
+	}
+
+	if len(jobIDs) != 1 {
+		return errors.New("unexpected number of job IDs returned")
+	}
+
+	return nil
+}
+
+// EnqueueOneShot submits a targeted one-shot job that syncs only the records
+// matched by filter (a Source-defined criteria document, see MarshalFilter).
+// Only valid on OneShot pipelines. seedCursor is the pagination start,
+// usually the cursor zero value.
+func (s *Pipeline[T]) EnqueueOneShot(ctx context.Context, seedCursor T, filter json.RawMessage) error {
+	if !s.OneShot {
+		return errors.New("EnqueueOneShot is only supported on OneShot pipelines")
+	}
+
+	req := &ExtractRequest[T]{
+		After:  seedCursor,
+		First:  s.PageSize,
+		Filter: filter,
+	}
+
+	return sqlx.Transaction(ctx, s.QueueDB, func(ctx context.Context, tx *sql.Tx) error {
+		return s.enqueueOneShotJob(ctx, tx, req, time.Now())
 	})
 }
 
