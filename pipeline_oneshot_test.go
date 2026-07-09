@@ -346,6 +346,30 @@ func TestOneShotPipeline(t *testing.T) {
 		env.waitDrained(t, queue)
 	})
 
+	// The empty-predicate check is the load-bearing guard of the consumer-side
+	// decode (strict decoding was deliberately dropped): every unusable filter
+	// collapses to either a decode error or an empty predicate, and must fail
+	// loudly instead of silently syncing nothing. Both guards fire before any
+	// database access, so these are direct Extract calls.
+	t.Run("unusable filters fail loudly", func(t *testing.T) {
+		for name, bad := range map[string]json.RawMessage{
+			"empty object":         json.RawMessage(`{}`),
+			"empty ids":            json.RawMessage(`{"ids":[]}`),
+			"typo'd field (idz)":   json.RawMessage(`{"idz":["user01"]}`),
+			"bare null":            json.RawMessage(`null`),
+			"invalid JSON":         json.RawMessage(`{`),
+			"wrong shape (string)": json.RawMessage(`"user01"`),
+		} {
+			t.Run(name, func(t *testing.T) {
+				_, err := env.syncer().Extract(env.ctx, &etl.ExtractRequest[*etl.Cursor]{
+					First:         oneShotPageSize,
+					OneShotFilter: bad,
+				})
+				assert.Error(t, err)
+			})
+		}
+	})
+
 	t.Run("generated SQL carries dedup id and survives quoting", func(t *testing.T) {
 		const queue = "oneshot_sqldoc_etl"
 		// No worker consumes this queue, so the in-flight window is
