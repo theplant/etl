@@ -29,7 +29,7 @@ const (
 	// time-window jobs — the seed job sweeps history, every completed job
 	// enqueues the next window, and the circuit breaker guards against
 	// runaway skip-and-continue.
-	PipelineModeIncremental PipelineMode = "incremental"
+	PipelineModeIncremental PipelineMode = "INCREMENTAL"
 
 	// PipelineModeOneShot runs targeted one-shot tasks:
 	//   - Start does not enqueue a seed job; jobs are submitted by executing
@@ -47,7 +47,7 @@ const (
 	// CircuitBreakerCooldown are unused in this mode.
 	// Run a one-shot pipeline on its own QueueName (e.g. "<name>_ONESHOT"),
 	// separate from the incremental pipeline's queue.
-	PipelineModeOneShot PipelineMode = "oneshot"
+	PipelineModeOneShot PipelineMode = "ONESHOT"
 )
 
 // PipelineConfig contains configuration for the pipeline
