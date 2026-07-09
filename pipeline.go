@@ -19,15 +19,17 @@ import (
 	"github.com/theplant/appkit/logtracing"
 )
 
-// PipelineMode selects the pipeline's scheduling behavior.
-type PipelineMode int
+// PipelineMode selects the pipeline's scheduling behavior. The values are
+// strings so the mode is self-describing wherever it leaks — logs, errors,
+// debuggers. The empty string is treated as PipelineModeIncremental.
+type PipelineMode string
 
 const (
-	// PipelineModeIncremental is the default (zero value): a
-	// self-perpetuating chain of time-window jobs — the seed job sweeps
-	// history, every completed job enqueues the next window, and the circuit
-	// breaker guards against runaway skip-and-continue.
-	PipelineModeIncremental PipelineMode = iota
+	// PipelineModeIncremental is the default: a self-perpetuating chain of
+	// time-window jobs — the seed job sweeps history, every completed job
+	// enqueues the next window, and the circuit breaker guards against
+	// runaway skip-and-continue.
+	PipelineModeIncremental PipelineMode = "incremental"
 
 	// PipelineModeOneShot runs targeted one-shot tasks:
 	//   - Start does not enqueue a seed job; jobs are submitted by executing
@@ -45,20 +47,8 @@ const (
 	// CircuitBreakerCooldown are unused in this mode.
 	// Run a one-shot pipeline on its own QueueName (e.g. "<name>_ONESHOT"),
 	// separate from the incremental pipeline's queue.
-	PipelineModeOneShot
+	PipelineModeOneShot PipelineMode = "oneshot"
 )
-
-// String implements fmt.Stringer for PipelineMode.
-func (m PipelineMode) String() string {
-	switch m {
-	case PipelineModeIncremental:
-		return "incremental"
-	case PipelineModeOneShot:
-		return "oneshot"
-	default:
-		return fmt.Sprintf("PipelineMode(%d)", int(m))
-	}
-}
 
 // PipelineConfig contains configuration for the pipeline
 type PipelineConfig[T any] struct {
@@ -74,7 +64,7 @@ type PipelineConfig[T any] struct {
 	Interval         time.Duration
 	ConsistencyDelay time.Duration
 
-	// Mode selects the scheduling behavior; the zero value is
+	// Mode selects the scheduling behavior. Leaving it empty selects
 	// PipelineModeIncremental, so existing configurations keep their
 	// behavior unchanged.
 	Mode PipelineMode
@@ -120,7 +110,7 @@ func (c *PipelineConfig[T]) Validate() error {
 	}
 
 	switch c.Mode {
-	case PipelineModeIncremental:
+	case PipelineModeIncremental, "":
 		// These parameters only drive the incremental chain mode
 		// (time-window scheduling and circuit breaker).
 		if c.Interval <= 0 {
@@ -141,7 +131,7 @@ func (c *PipelineConfig[T]) Validate() error {
 	case PipelineModeOneShot:
 		// No time-window or circuit-breaker parameters in this mode.
 	default:
-		return errors.Errorf("unknown Mode: %v", c.Mode)
+		return errors.Errorf("unknown Mode: %q", c.Mode)
 	}
 
 	return nil

@@ -490,6 +490,18 @@ func TestOneShotPipeline(t *testing.T) {
 		env.waitExpired(t, chainQueue, 1)
 		assert.Equal(t, 1, env.countPending(t, chainQueue), "the chain must keep running after expiring the mismatched job")
 	})
+
+	t.Run("unknown pipeline mode is rejected", func(t *testing.T) {
+		_, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
+			Source:      env.syncer(),
+			QueueDB:     env.queueDB,
+			QueueName:   "mode_validation_etl",
+			PageSize:    4,
+			Mode:        "banana",
+			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+		})
+		assert.Error(t, err, "an unknown Mode must be rejected instead of falling through to either behavior")
+	})
 }
 
 // Pure input validation of the one-shot helpers lives in
