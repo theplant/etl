@@ -12,17 +12,18 @@ import (
 )
 
 // OneShotJobSQLInput describes the one-shot job to submit.
-type OneShotJobSQLInput struct {
+// T is the pipeline's cursor type: the worker decodes the job's After back
+// into it, so instantiate T with the same type the target pipeline uses.
+type OneShotJobSQLInput[T any] struct {
 	// QueueName is the one-shot pipeline's queue.
 	QueueName string
 	// PageSize should match the pipeline's PageSize.
 	PageSize int
 	// SeedCursor is the pagination start, usually the cursor zero value
-	// (e.g. &etl.Cursor{}). Its concrete type must be the pipeline's cursor
-	// type T — the worker decodes the job's After back into it. Must not be
-	// nil: a nil cursor would render "After":null into the job document, and
-	// its meaning would then depend entirely on the Source's nil handling.
-	SeedCursor any
+	// (e.g. &etl.Cursor{}). Must not be nil: a nil cursor would render
+	// "After":null into the job document, and its meaning would then depend
+	// entirely on the Source's nil handling.
+	SeedCursor T
 	// Filter selects the records to sync: an instance of the Source-defined
 	// filter schema (authored as a struct literal, which the compiler checks
 	// on its own), rendered into the SQL document via json.Marshal.
@@ -38,7 +39,7 @@ type OneShotJobSQLInput struct {
 // unique id (at most one task per queue can be in flight: executing another
 // statement meanwhile violates the unique constraint) and the Lockable
 // lifecycle expected by the one-shot worker.
-func BuildOneShotJobSQL(in *OneShotJobSQLInput) (string, error) {
+func BuildOneShotJobSQL[T any](in *OneShotJobSQLInput[T]) (string, error) {
 	if in == nil {
 		return "", errors.New("input is nil")
 	}
@@ -68,7 +69,7 @@ func BuildOneShotJobSQL(in *OneShotJobSQLInput) (string, error) {
 		return "", errors.New("filter must not encode to null")
 	}
 
-	req := &ExtractRequest[any]{
+	req := &ExtractRequest[T]{
 		After:         in.SeedCursor,
 		First:         in.PageSize,
 		OneShotFilter: filter,
