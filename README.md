@@ -210,6 +210,97 @@ Prevents resource exhaustion during persistent failures:
 
 ## Advanced Usage
 
+### One-Shot Targeted Sync
+
+Besides the incremental chain mode, a pipeline can run in one-shot mode to
+sync only specific records on demand (e.g. re-sync a handful of IDs after a
+data incident) without touching the incremental pipeline:
+
+```go
+// A dedicated one-shot pipeline on its own queue, sharing the same Source.
+// Interval/ConsistencyDelay/CircuitBreaker* are not needed in this mode.
+oneShot, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
+    Source:      source, // same Source as the incremental pipeline
+    QueueDB:     queueDB,
+    QueueName:   "USER_SYNC_ONESHOT", // separate from the incremental queue
+    PageSize:    500,
+    Mode:        etl.PipelineModeOneShot,
+    RetryPolicy: bus.DefaultRetryPolicyFactory(),
+})
+
+// Start only boots the worker — no seed job is enqueued.
+controller, err := oneShot.Start(ctx, &etl.Cursor{})
+
+// Submit a targeted task: render the INSERT statement and execute it
+// against the queue database (typically handed to an operator).
+sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, MyFilter]{
+    QueueName:   "USER_SYNC_ONESHOT",
+    PageSize:    500,
+    SeedCursor:  &etl.Cursor{},
+    Filter:      MyFilter{IDs: []string{"user1", "user2"}},
+    RetryPolicy: bus.DefaultRetryPolicyFactory(),
+})
+```
+
+The Source reads `req.OneShotFilter` in `Extract` and replaces the time-window
+predicate with its own criteria (keyset pagination via `req.After` still
+applies):
+
+```go
+func (s *MySource) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
+    // ...
+    if req.OneShotFilter != nil {
+        // Decoding the opaque filter is the Source's obligation. The
+        // emptiness check is the load-bearing guard: an unusable filter
+        // (wrong shape, typo'd field, empty ids) collapses to an empty
+        // predicate and must fail loudly instead of silently syncing nothing.
+        var filter MyFilter
+        if err := json.Unmarshal(req.OneShotFilter, &filter); err != nil {
+            return nil, err
+        }
+        if len(filter.IDs) == 0 {
+            return nil, errors.New("filter must specify at least one id")
+        }
+        query += ` AND id IN ?`
+        args = append(args, filter.IDs)
+    } else {
+        query += ` AND updated_at >= ? AND updated_at < ?`
+        args = append(args, req.FromAt, req.BeforeAt)
+    }
+    // ... transform / target exactly as in incremental mode
+}
+```
+
+Semantics:
+
+- On success the job is destroyed; large filtered sets page through
+  next-page jobs carrying the same `OneShotFilter`, then the task ends. No
+  time-window successor is ever enqueued.
+- On failure the job retries per `RetryPolicy` and is expired (with the
+  error recorded) when retries are exhausted. The circuit breaker only
+  governs the incremental chain.
+- Every one-shot job carries the fixed `unique_id` `etl_oneshot` (see
+  `OneShotUniqueID`) with `Lockable` lifecycle. The `goque_jobs` unique
+  constraint is scoped to `(queue, unique_id)`, so this serializes tasks
+  queue-wide — even across replicas: while a task is in flight, submitting
+  another statement (same or different filter) violates the constraint;
+  completion or expiry releases the id and the next task can be submitted.
+  This also guarantees one-shot staging tables are never used by two tasks
+  concurrently.
+- One-shot staging names never collide with the incremental chain's either:
+  `ExtractRequest.String()` (which pgtarget/bqtarget derive staging table
+  names from) prefixes one-shot requests with `os_`, so a task's
+  zero-seed-cursor name can never meet a chain request whose cursor is still
+  zero (a chain that has not synced any data yet). If multiple one-shot
+  pipelines share one real-table target (a bqtarget dataset, or pgtarget with
+  `UseUnloggedTable`), namespace staging names per pipeline via the staging
+  table hook.
+- A job whose args do not match the pipeline's mode (e.g. a filtered job
+  inserted into an incremental queue) is expired immediately.
+- Hand-written inserts remain possible; give them the same `unique_id`
+  (`etl_oneshot`) with `unique_lifecycle = 3` (Lockable) so they participate
+  in the same queue-wide serialization.
+
 ### Custom Cursor Types
 
 Use your own cursor type for specific tracking needs:

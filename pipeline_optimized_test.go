@@ -2,6 +2,7 @@ package etl_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -37,6 +38,14 @@ type OptimizedUser struct {
 }
 
 // ====== Optimized Source Implementation ======
+
+// OptimizedUserFilter is the source-defined criteria document for one-shot
+// targeted sync (see PipelineModeOneShot). It travels opaquely inside
+// ExtractRequest.OneShotFilter; only this Source knows its schema. Extend it with
+// new fields (emails, time range, ...) to support more targeting criteria.
+type OptimizedUserFilter struct {
+	IDs []string `json:"ids,omitempty"`
+}
 
 type optimizedIdentitySyncer struct {
 	sourceDB *gorm.DB
@@ -76,8 +85,27 @@ func (s *optimizedIdentitySyncer) Extract(ctx context.Context, req *etl.ExtractR
 		args = append(args, cursor.At, cursor.ID)
 	}
 
-	usersQuery += ` AND updated_at >= ? AND updated_at < ?`
-	args = append(args, req.FromAt, req.BeforeAt)
+	if req.OneShotFilter != nil {
+		// One-shot targeted request: the caller-provided filter replaces the
+		// incremental time window as the set predicate. Keyset pagination
+		// (After cursor) still applies on top of it. Decoding the opaque
+		// filter is this Source's obligation; the emptiness check below is
+		// the load-bearing guard — an unusable filter (wrong shape, typo'd
+		// field, empty ids) collapses to an empty predicate and must fail
+		// loudly instead of silently syncing nothing.
+		var filter OptimizedUserFilter
+		if err := json.Unmarshal(req.OneShotFilter, &filter); err != nil {
+			return nil, errors.Wrap(err, "failed to unmarshal filter")
+		}
+		if len(filter.IDs) == 0 {
+			return nil, errors.New("filter must specify at least one id")
+		}
+		usersQuery += ` AND id IN ?`
+		args = append(args, filter.IDs)
+	} else {
+		usersQuery += ` AND updated_at >= ? AND updated_at < ?`
+		args = append(args, req.FromAt, req.BeforeAt)
+	}
 
 	usersQuery += ` ORDER BY updated_at ASC, id ASC LIMIT ?`
 	args = append(args, req.First+1)
