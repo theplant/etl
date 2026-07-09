@@ -224,7 +224,7 @@ oneShot, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
     QueueDB:     queueDB,
     QueueName:   "USER_SYNC_ONESHOT", // separate from the incremental queue
     PageSize:    500,
-    OneShot:     true,
+    Mode:        etl.PipelineModeOneShot,
     RetryPolicy: bus.DefaultRetryPolicyFactory(),
 })
 

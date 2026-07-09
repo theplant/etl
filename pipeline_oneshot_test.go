@@ -239,7 +239,7 @@ func (e *oneShotEnv) startOneShot(t *testing.T, queue string, source etl.Source[
 		QueueDB:     e.queueDB,
 		QueueName:   queue,
 		PageSize:    oneShotPageSize,
-		OneShot:     true,
+		Mode:        etl.PipelineModeOneShot,
 		RetryPolicy: policy,
 	})
 	require.NoError(t, err, "Failed to create one-shot pipeline")

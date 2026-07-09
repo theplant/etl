@@ -40,7 +40,7 @@ type OptimizedUser struct {
 // ====== Optimized Source Implementation ======
 
 // OptimizedUserFilter is the source-defined criteria document for one-shot
-// targeted sync (see PipelineConfig.OneShot). It travels opaquely inside
+// targeted sync (see PipelineModeOneShot). It travels opaquely inside
 // ExtractRequest.OneShotFilter; only this Source knows its schema. Extend it with
 // new fields (emails, time range, ...) to support more targeting criteria.
 type OptimizedUserFilter struct {

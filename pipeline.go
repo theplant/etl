@@ -19,6 +19,47 @@ import (
 	"github.com/theplant/appkit/logtracing"
 )
 
+// PipelineMode selects the pipeline's scheduling behavior.
+type PipelineMode int
+
+const (
+	// PipelineModeIncremental is the default (zero value): a
+	// self-perpetuating chain of time-window jobs — the seed job sweeps
+	// history, every completed job enqueues the next window, and the circuit
+	// breaker guards against runaway skip-and-continue.
+	PipelineModeIncremental PipelineMode = iota
+
+	// PipelineModeOneShot runs targeted one-shot tasks:
+	//   - Start does not enqueue a seed job; jobs are submitted by executing
+	//     a goque_jobs INSERT rendered by BuildOneShotJobSQL, each carrying a
+	//     Source-defined OneShotFilter.
+	//   - Every job must carry a OneShotFilter; the Source uses it instead of
+	//     the FromAt/BeforeAt time window to select records.
+	//   - On success the job is destroyed. If the filtered set spans multiple
+	//     pages, the next page is enqueued with the same OneShotFilter and an
+	//     advanced cursor; the task ends when the last page completes. No
+	//     time-window successor is ever enqueued.
+	//   - On failure the job is retried per RetryPolicy and expired when
+	//     retries are exhausted. The circuit breaker is not involved.
+	// Interval, ConsistencyDelay, CircuitBreakerThreshold and
+	// CircuitBreakerCooldown are unused in this mode.
+	// Run a one-shot pipeline on its own QueueName (e.g. "<name>_ONESHOT"),
+	// separate from the incremental pipeline's queue.
+	PipelineModeOneShot
+)
+
+// String implements fmt.Stringer for PipelineMode.
+func (m PipelineMode) String() string {
+	switch m {
+	case PipelineModeIncremental:
+		return "incremental"
+	case PipelineModeOneShot:
+		return "oneshot"
+	default:
+		return fmt.Sprintf("PipelineMode(%d)", int(m))
+	}
+}
+
 // PipelineConfig contains configuration for the pipeline
 type PipelineConfig[T any] struct {
 	// Core dependencies
@@ -33,24 +74,10 @@ type PipelineConfig[T any] struct {
 	Interval         time.Duration
 	ConsistencyDelay time.Duration
 
-	// OneShot switches the pipeline from the incremental chain mode to the
-	// targeted one-shot mode:
-	//   - Start does not enqueue a seed job; jobs are submitted by executing
-	//     a goque_jobs INSERT rendered by BuildOneShotJobSQL, each carrying a
-	//     Source-defined OneShotFilter.
-	//   - Every job must carry a OneShotFilter; the Source uses it instead of the
-	//     FromAt/BeforeAt time window to select records.
-	//   - On success the job is destroyed. If the filtered set spans multiple
-	//     pages, the next page is enqueued with the same OneShotFilter and an
-	//     advanced cursor; the task ends when the last page completes. No
-	//     time-window successor is ever enqueued.
-	//   - On failure the job is retried per RetryPolicy and expired when
-	//     retries are exhausted. The circuit breaker is not involved.
-	// Interval, ConsistencyDelay, CircuitBreakerThreshold and
-	// CircuitBreakerCooldown are unused in this mode.
-	// Run a one-shot pipeline on its own QueueName (e.g. "<name>_ONESHOT"),
-	// separate from the incremental pipeline's queue.
-	OneShot bool
+	// Mode selects the scheduling behavior; the zero value is
+	// PipelineModeIncremental, so existing configurations keep their
+	// behavior unchanged.
+	Mode PipelineMode
 
 	// Retry and circuit breaker configuration
 	RetryPolicy             *que.RetryPolicy
@@ -59,6 +86,11 @@ type PipelineConfig[T any] struct {
 
 	// Optional configurations
 	Notifier errornotifier.Notifier
+}
+
+// oneShot reports whether the pipeline runs in one-shot mode.
+func (c *PipelineConfig[T]) oneShot() bool {
+	return c.Mode == PipelineModeOneShot
 }
 
 // Validate validates the configuration
@@ -87,10 +119,10 @@ func (c *PipelineConfig[T]) Validate() error {
 		return errors.New("RetryPolicy is required")
 	}
 
-	// The remaining parameters only drive the incremental chain mode
-	// (time-window scheduling and circuit breaker) and are unused in
-	// one-shot mode.
-	if !c.OneShot {
+	switch c.Mode {
+	case PipelineModeIncremental:
+		// These parameters only drive the incremental chain mode
+		// (time-window scheduling and circuit breaker).
 		if c.Interval <= 0 {
 			return errors.New("Interval must be greater than 0")
 		}
@@ -106,6 +138,10 @@ func (c *PipelineConfig[T]) Validate() error {
 		if c.CircuitBreakerCooldown <= 0 {
 			return errors.New("CircuitBreakerCooldown must be greater than 0")
 		}
+	case PipelineModeOneShot:
+		// No time-window or circuit-breaker parameters in this mode.
+	default:
+		return errors.Errorf("unknown Mode: %v", c.Mode)
 	}
 
 	return nil
@@ -142,7 +178,7 @@ func NewPipeline[T any](conf *PipelineConfig[T]) (*Pipeline[T], error) {
 // is unused) — jobs are submitted by executing SQL rendered with
 // BuildOneShotJobSQL.
 func (s *Pipeline[T]) Start(ctx context.Context, seedCursor T) (quex.WorkerController, error) {
-	if !s.OneShot {
+	if !s.oneShot() {
 		if err := s.enqueueSeedJob(ctx, seedCursor); err != nil {
 			return nil, err
 		}
@@ -285,12 +321,12 @@ func (s *Pipeline[T]) Process(ctx context.Context, job que.Job) (xerr error) {
 	// manually inserted into an incremental queue, or vice versa) cannot be
 	// fixed by retrying, so expire it right away instead of retrying or,
 	// worse, silently misinterpreting it.
-	if s.OneShot != (len(req.OneShotFilter) > 0) {
+	if s.oneShot() != (len(req.OneShotFilter) > 0) {
 		spanKVs["mode_mismatch"] = true
 		return s.expireMismatchedJob(ctx, job)
 	}
 
-	if s.OneShot {
+	if s.oneShot() {
 		return s.processOneShot(ctx, job, &req)
 	}
 
@@ -394,7 +430,7 @@ func (s *Pipeline[T]) calculateCooldownRunAt() time.Time {
 // pipeline's mode.
 func (s *Pipeline[T]) expireMismatchedJob(ctx context.Context, job que.Job) error {
 	var reason error
-	if s.OneShot {
+	if s.oneShot() {
 		reason = errors.New("one-shot pipeline received a job without filter")
 	} else {
 		reason = errors.New("incremental pipeline received a one-shot (filtered) job")
