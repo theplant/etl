@@ -46,7 +46,14 @@ type CreateStagingTableFunc[T any] func(ctx context.Context, input *CreateStagin
 
 // Config represents the configuration for creating a PostgreSQL target
 type Config[T any] struct {
-	DB               *gorm.DB
+	DB *gorm.DB
+	// Req names the staging tables (suffix derived from Req.String()).
+	// Caution: with UseUnloggedTable enabled, staging tables are real shared
+	// tables — if multiple pipelines write to the same target table,
+	// requests at the same cursor position map to the same staging name and
+	// concurrent jobs would truncate each other's staged rows; namespace the
+	// names per pipeline via WithCreateStagingTableHook in that case.
+	// (Irrelevant for the default TEMP tables, which are session-scoped.)
 	Req              *etl.ExtractRequest[T]
 	Datas            etl.TargetDatas
 	CommitFunc       CommitFunc[T]

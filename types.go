@@ -46,13 +46,32 @@ type ExtractRequest[T any] struct {
 	OneShotFilter json.RawMessage `json:",omitempty"`
 }
 
-// String generates a deterministic string representation for the ExtractRequest
+// String generates a deterministic string representation for the ExtractRequest.
+// pgtarget and bqtarget derive staging table names from it, so requests that
+// can run concurrently against one target must map to distinct strings: a
+// one-shot request (OneShotFilter set) is prefixed with "os_", because its
+// first page always carries the zero seed cursor and would otherwise collide
+// with an incremental request whose cursor is still zero (a chain that has
+// not synced any data yet). Incremental requests keep the historical
+// cursor-only format byte-for-byte.
+//
+// Caution: if multiple pipelines write to the same target table, this
+// cursor-derived name alone cannot tell their requests apart — two pipelines
+// at the same cursor position (e.g. two one-shot tasks on different queues,
+// both at the zero seed cursor) map to the same staging name. Harmless with
+// session-scoped TEMP staging tables (pgtarget default), but with real shared
+// staging tables (bqtarget, or pgtarget with UseUnloggedTable) concurrent
+// jobs would truncate each other's staged rows — namespace the staging names
+// per pipeline via the staging table hook in that case.
 func (req *ExtractRequest[T]) String() string {
 	var after string
 	if stringer, ok := any(req.After).(fmt.Stringer); ok {
 		after = stringer.String()
 	} else {
 		after = fmt.Sprint(req.After)
+	}
+	if len(req.OneShotFilter) > 0 {
+		return "os_" + after
 	}
 	return after
 }

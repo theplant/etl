@@ -47,8 +47,14 @@ type CreateStagingTableFunc[T any] func(ctx context.Context, input *CreateStagin
 
 // Config represents the configuration for creating a BigQuery target
 type Config[T any] struct {
-	Client          *bigquery.Client
-	DatasetID       string
+	Client    *bigquery.Client
+	DatasetID string
+	// Req names the staging tables (suffix derived from Req.String()).
+	// Caution: BigQuery staging tables are real shared dataset tables — if
+	// multiple pipelines write to the same target table, requests at the
+	// same cursor position map to the same staging name and concurrent jobs
+	// would truncate each other's staged rows; namespace the names per
+	// pipeline via WithCreateStagingTableHook in that case.
 	Req             *etl.ExtractRequest[T]
 	Datas           etl.TargetDatas
 	CommitFunc      CommitFunc[T]

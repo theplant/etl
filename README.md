@@ -289,6 +289,14 @@ Semantics:
   completion or expiry releases the id and the next task can be submitted.
   This also guarantees one-shot staging tables are never used by two tasks
   concurrently.
+- One-shot staging names never collide with the incremental chain's either:
+  `ExtractRequest.String()` (which pgtarget/bqtarget derive staging table
+  names from) prefixes one-shot requests with `os_`, so a task's
+  zero-seed-cursor name can never meet a chain request whose cursor is still
+  zero (a chain that has not synced any data yet). If multiple one-shot
+  pipelines share one real-table target (a bqtarget dataset, or pgtarget with
+  `UseUnloggedTable`), namespace staging names per pipeline via the staging
+  table hook.
 - A job whose args do not match the pipeline's mode (e.g. a filtered job
   inserted into an incremental queue) is expired immediately.
 - Hand-written inserts remain possible; give them the same `unique_id`
