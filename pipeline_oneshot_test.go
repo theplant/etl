@@ -189,7 +189,7 @@ func (e *oneShotEnv) buildSQL(t *testing.T, queue string, filter OptimizedUserFi
 	if policy == nil {
 		policy = bus.DefaultRetryPolicyFactory()
 	}
-	sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
+	sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor]{
 		QueueName:   queue,
 		PageSize:    oneShotPageSize,
 		SeedCursor:  &etl.Cursor{},

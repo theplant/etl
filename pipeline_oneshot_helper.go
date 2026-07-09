@@ -12,9 +12,7 @@ import (
 )
 
 // OneShotJobSQLInput describes the one-shot job to submit.
-// F is the Source-defined filter schema: the filter is authored as a typed
-// struct in code (compile-checked), then rendered into the SQL document.
-type OneShotJobSQLInput[T any, F any] struct {
+type OneShotJobSQLInput[T any] struct {
 	// QueueName is the one-shot pipeline's queue.
 	QueueName string
 	// PageSize should match the pipeline's PageSize.
@@ -24,8 +22,10 @@ type OneShotJobSQLInput[T any, F any] struct {
 	// "After":null into the job document, and its meaning would then depend
 	// entirely on the Source's nil handling.
 	SeedCursor T
-	// Filter selects the records to sync.
-	Filter F
+	// Filter selects the records to sync: an instance of the Source-defined
+	// filter schema (authored as a struct literal, which the compiler checks
+	// on its own), rendered into the SQL document via json.Marshal.
+	Filter any
 	// RetryPolicy for the job, e.g. bus.DefaultRetryPolicyFactory().
 	RetryPolicy *que.RetryPolicy
 }
@@ -37,7 +37,7 @@ type OneShotJobSQLInput[T any, F any] struct {
 // unique id (at most one task per queue can be in flight: executing another
 // statement meanwhile violates the unique constraint) and the Lockable
 // lifecycle expected by the one-shot worker.
-func BuildOneShotJobSQL[T any, F any](in *OneShotJobSQLInput[T, F]) (string, error) {
+func BuildOneShotJobSQL[T any](in *OneShotJobSQLInput[T]) (string, error) {
 	if in == nil {
 		return "", errors.New("input is nil")
 	}
