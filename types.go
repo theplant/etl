@@ -2,8 +2,6 @@ package etl
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -46,13 +44,7 @@ type ExtractRequest[T any] struct {
 	OneShotFilter json.RawMessage `json:",omitempty"`
 }
 
-// String generates a deterministic string representation for the ExtractRequest.
-// pgtarget and bqtarget derive staging table names from it, so requests that
-// may run concurrently must map to distinct strings: a one-shot request
-// (OneShotFilter set) appends a short digest of the filter, because its first
-// page always carries the zero seed cursor — without the digest, every
-// one-shot task's page 1 (and the incremental chain's initial sweep) would
-// share one staging table name.
+// String generates a deterministic string representation for the ExtractRequest
 func (req *ExtractRequest[T]) String() string {
 	var after string
 	if stringer, ok := any(req.After).(fmt.Stringer); ok {
@@ -60,11 +52,7 @@ func (req *ExtractRequest[T]) String() string {
 	} else {
 		after = fmt.Sprint(req.After)
 	}
-	if len(req.OneShotFilter) == 0 {
-		return after
-	}
-	sum := sha256.Sum256(req.OneShotFilter)
-	return after + "_os" + hex.EncodeToString(sum[:4])
+	return after
 }
 
 // ExtractResponse represents the response from source data read
