@@ -37,9 +37,9 @@ type ExtractRequest[T any] struct {
 	// PipelineConfig.OneShot). It is opaque to the framework: the submitter
 	// (see BuildOneShotJobSQL) provides it and the Source decodes and
 	// interprets it, replacing the FromAt/BeforeAt time-window predicate
-	// with its own filter predicate. Sources should decode strictly (e.g.
-	// json.Decoder with DisallowUnknownFields plus an emptiness check) so a
-	// typo in a hand-written job fails loudly instead of matching nothing.
+	// with its own filter predicate. After decoding, the Source must reject
+	// a filter that yields an empty predicate (e.g. no ids), so an unusable
+	// job fails loudly instead of silently syncing nothing.
 	// It stays constant across all pages of one one-shot task while After
 	// advances. It is empty on incremental pipeline jobs; conversely,
 	// FromAt/BeforeAt are zero on one-shot jobs.

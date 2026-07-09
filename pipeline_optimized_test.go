@@ -1,7 +1,6 @@
 package etl_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -90,13 +89,12 @@ func (s *optimizedIdentitySyncer) Extract(ctx context.Context, req *etl.ExtractR
 		// One-shot targeted request: the caller-provided filter replaces the
 		// incremental time window as the set predicate. Keyset pagination
 		// (After cursor) still applies on top of it. Decoding the opaque
-		// filter is this Source's obligation; decode strictly and reject an
-		// empty predicate so a hand-written job with a typo (e.g. "idz")
-		// fails loudly instead of silently matching nothing.
+		// filter is this Source's obligation; the emptiness check below is
+		// the load-bearing guard — an unusable filter (wrong shape, typo'd
+		// field, empty ids) collapses to an empty predicate and must fail
+		// loudly instead of silently syncing nothing.
 		var filter OptimizedUserFilter
-		dec := json.NewDecoder(bytes.NewReader(req.OneShotFilter))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&filter); err != nil {
+		if err := json.Unmarshal(req.OneShotFilter, &filter); err != nil {
 			return nil, errors.Wrap(err, "failed to unmarshal filter")
 		}
 		if len(filter.IDs) == 0 {
