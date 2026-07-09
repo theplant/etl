@@ -233,7 +233,7 @@ controller, err := oneShot.Start(ctx, &etl.Cursor{})
 
 // Submit a targeted task: render the INSERT statement and execute it
 // against the queue database (typically handed to an operator).
-sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor]{
+sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput{
     QueueName:   "USER_SYNC_ONESHOT",
     PageSize:    500,
     SeedCursor:  &etl.Cursor{},

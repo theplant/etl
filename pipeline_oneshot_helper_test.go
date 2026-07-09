@@ -21,7 +21,7 @@ type helperFilter struct {
 
 func TestBuildOneShotJobSQL(t *testing.T) {
 	t.Run("renders the full statement deterministically", func(t *testing.T) {
-		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName:  "q1",
 			PageSize:   4,
 			SeedCursor: &Cursor{},
@@ -43,7 +43,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 	})
 
 	t.Run("escapes quotes and backslashes in rendered values", func(t *testing.T) {
-		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName:   "q'1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
@@ -57,31 +57,31 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 	})
 
 	t.Run("validates its input", func(t *testing.T) {
-		_, err := BuildOneShotJobSQL[*Cursor](nil)
+		_, err := BuildOneShotJobSQL(nil)
 		assert.Error(t, err, "nil input must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput{
 			PageSize:    4,
 			Filter:      helperFilter{IDs: []string{"a"}},
 			RetryPolicy: bus.DefaultRetryPolicyFactory(),
 		})
 		assert.Error(t, err, "missing QueueName must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName:   "q1",
 			Filter:      helperFilter{IDs: []string{"a"}},
 			RetryPolicy: bus.DefaultRetryPolicyFactory(),
 		})
 		assert.Error(t, err, "missing PageSize must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName: "q1",
 			PageSize:  4,
 			Filter:    helperFilter{IDs: []string{"a"}},
 		})
 		assert.Error(t, err, "missing RetryPolicy must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName:   "q1",
 			PageSize:    4,
 			Filter:      helperFilter{IDs: []string{"a"}},
@@ -89,7 +89,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		})
 		assert.Error(t, err, "nil SeedCursor must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName:   "q1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
@@ -98,7 +98,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		})
 		assert.Error(t, err, "nil filter must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName:   "q1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
@@ -107,7 +107,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		})
 		assert.Error(t, err, "typed nil pointer filter (encodes to JSON null) must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput{
 			QueueName:   "q1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
