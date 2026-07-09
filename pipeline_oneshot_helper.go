@@ -2,8 +2,6 @@ package etl
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -57,17 +55,17 @@ func UnmarshalOneShotFilter[F any](filter json.RawMessage) (*F, error) {
 	return f, nil
 }
 
-// OneShotUniqueID derives the queue-level unique id of a one-shot job from
-// its filter bytes: "etl_oneshot_" + hex(sha256(filter)). Identical filters
-// map to the same id, so with que.Lockable an identical task cannot be
-// double-fired while one is in flight; completion or expiry releases the id
-// and the same filter can be fired again. The mapping is byte-level:
-// semantically equal but differently encoded filters (e.g. reordered ids)
-// produce different ids.
-func OneShotUniqueID(filter json.RawMessage) string {
-	sum := sha256.Sum256(filter)
-	return "etl_oneshot_" + hex.EncodeToString(sum[:])
-}
+// OneShotUniqueID is the queue-level unique id shared by every one-shot job,
+// mirroring the incremental chain's UniqueID ("etl_pipeline"). Uniqueness is
+// scoped per queue by the goque_jobs (queue, unique_id) index, and with the
+// que.Lockable lifecycle it serializes one-shot tasks at the queue level:
+// while a task is in flight — across all replicas — submitting another one
+// violates the unique constraint; completion or expiry releases the id.
+// Next-page jobs carry the same id (destroy + insert in one transaction
+// hands it over), keeping the whole task exclusive until its last page
+// completes or a page expires. This also guarantees one-shot staging tables
+// are never used by two tasks concurrently.
+var OneShotUniqueID = "etl_oneshot"
 
 // OneShotJobSQLInput describes the one-shot job to submit.
 // F is the Source-defined filter schema: the filter is authored as a typed
@@ -91,10 +89,10 @@ type OneShotJobSQLInput[T any, F any] struct {
 // BuildOneShotJobSQL renders the INSERT statement that submits a one-shot
 // job — the submission path for one-shot sync, typically handed to an
 // operator for execution against the queue database. The job carries the
-// args document (ExtractRequest incl. OneShotFilter), the filter-derived
-// unique id (executing the same statement twice while the task is in flight
-// violates the unique constraint) and the Lockable lifecycle expected by the
-// one-shot worker.
+// args document (ExtractRequest incl. OneShotFilter), the fixed one-shot
+// unique id (at most one task per queue can be in flight: executing another
+// statement meanwhile violates the unique constraint) and the Lockable
+// lifecycle expected by the one-shot worker.
 func BuildOneShotJobSQL[T any, F any](in *OneShotJobSQLInput[T, F]) (string, error) {
 	if in == nil {
 		return "", errors.New("input is nil")
@@ -133,7 +131,7 @@ func BuildOneShotJobSQL[T any, F any](in *OneShotJobSQLInput[T, F]) (string, err
 	// standalone document executed later by an operator, so no parameter
 	// binding channel exists at generation time. Every injection-shaped
 	// failure is closed at the interpolation points instead: all string
-	// values go through QuoteLiteral, the unique id's alphabet is hex-only,
+	// values go through QuoteLiteral, the unique id is a fixed constant,
 	// unique_lifecycle is rendered as an integer, and no identifiers are
 	// interpolated. Round-trip byte-exactness (quotes and backslashes in the
 	// payload included) is pinned by tests.
@@ -143,7 +141,7 @@ VALUES (%s, now(), %s, %s, %s, %d);`,
 		QuoteLiteral(in.QueueName),
 		QuoteLiteral(string(args)),
 		QuoteLiteral(string(retryPolicy)),
-		QuoteLiteral(OneShotUniqueID(filter)),
+		QuoteLiteral(OneShotUniqueID),
 		que.Lockable,
 	)
 	return sql, nil

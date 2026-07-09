@@ -1,8 +1,6 @@
 package etl_test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -91,22 +89,10 @@ func TestUnmarshalOneShotFilter(t *testing.T) {
 }
 
 func TestOneShotUniqueID(t *testing.T) {
-	filter := json.RawMessage(`{"ids":["a"]}`)
-
-	id := etl.OneShotUniqueID(filter)
-	sum := sha256.Sum256(filter)
-	assert.Equal(t, "etl_oneshot_"+hex.EncodeToString(sum[:]), id)
-	assert.Len(t, id, len("etl_oneshot_")+64, "prefix + sha256 hex must fit varchar(255)")
-
-	assert.Equal(t, id, etl.OneShotUniqueID(json.RawMessage(`{"ids":["a"]}`)),
-		"same bytes must map to the same id")
-	assert.NotEqual(t, id, etl.OneShotUniqueID(json.RawMessage(`{"ids":["b"]}`)))
-
-	// The mapping is deliberately byte-level: semantically equal but
-	// differently encoded filters (e.g. reordered ids) produce different ids.
-	assert.NotEqual(t,
-		etl.OneShotUniqueID(json.RawMessage(`{"ids":["a","b"]}`)),
-		etl.OneShotUniqueID(json.RawMessage(`{"ids":["b","a"]}`)))
+	// Hand-written submission statements in runbooks depend on this exact
+	// value: a changed constant would let a new task slip past an in-flight
+	// old-constant task instead of being serialized behind it.
+	assert.Equal(t, "etl_oneshot", etl.OneShotUniqueID)
 }
 
 func TestBuildOneShotJobSQL(t *testing.T) {
@@ -127,7 +113,7 @@ func TestBuildOneShotJobSQL(t *testing.T) {
 		want := fmt.Sprintf(
 			`INSERT INTO goque_jobs (queue, run_at, args, retry_policy, unique_id, unique_lifecycle)
 VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,"FromAt":"0001-01-01T00:00:00Z","BeforeAt":"0001-01-01T00:00:00Z","OneShotFilter":{"ids":["a"]}}]', '{"initialInterval":1000000000,"maxInterval":0,"nextIntervalMultiplier":1,"intervalRandomPercent":0,"maxRetryCount":1}', %s, %d);`,
-			etl.QuoteLiteral(etl.OneShotUniqueID(json.RawMessage(`{"ids":["a"]}`))),
+			etl.QuoteLiteral(etl.OneShotUniqueID),
 			que.Lockable,
 		)
 		assert.Equal(t, want, sqlText)

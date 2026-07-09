@@ -339,7 +339,7 @@ func TestOneShotPipeline(t *testing.T) {
 		assert.Equal(t, "user04", reqs[1].After.ID, "page 2 continues after the last row of page 1")
 		assert.Equal(t, "user08", reqs[2].After.ID, "page 3 continues after the last row of page 2")
 
-		// Completion released the filter-derived unique id (que.Lockable):
+		// Completion released the fixed one-shot unique id (que.Lockable):
 		// re-executing the very same statement is accepted and runs again.
 		require.NoError(t, env.exec(taskSQL))
 		env.waitDrained(t, queue)
@@ -363,7 +363,7 @@ func TestOneShotPipeline(t *testing.T) {
 
 		expectedFilter, err := etl.MarshalOneShotFilter(quotedFilter)
 		require.NoError(t, err)
-		assert.Equal(t, etl.OneShotUniqueID(expectedFilter), uniqueID)
+		assert.Equal(t, etl.OneShotUniqueID, uniqueID)
 		assert.Equal(t, int(que.Lockable), lifecycle)
 
 		var req etl.ExtractRequest[*etl.Cursor]
@@ -379,9 +379,14 @@ func TestOneShotPipeline(t *testing.T) {
 		require.Error(t, err, "duplicate execution of the generated SQL must be rejected")
 		assert.Contains(t, err.Error(), "goque_jobs_unique_uidx")
 
-		// ...while a different filter coexists in the same queue.
-		env.submit(t, queue, OptimizedUserFilter{IDs: []string{"user03"}})
-		assert.Equal(t, 2, env.countJobs(t, queue))
+		// ...and so is a task with a different filter: the fixed unique id
+		// serializes one-shot tasks queue-wide, so nothing else can be
+		// submitted until the in-flight task completes or expires.
+		otherSQL := env.buildSQL(t, queue, OptimizedUserFilter{IDs: []string{"user03"}}, nil)
+		err = env.exec(otherSQL)
+		require.Error(t, err, "a second task must be rejected while one is in flight")
+		assert.Contains(t, err.Error(), "goque_jobs_unique_uidx")
+		assert.Equal(t, 1, env.countJobs(t, queue), "the in-flight task must remain the only job")
 
 		// This queue has no worker to drain it; clean up by hand.
 		_, err = env.queueDB.ExecContext(env.ctx, `DELETE FROM goque_jobs WHERE queue = $1`, queue)
@@ -413,7 +418,7 @@ func TestOneShotPipeline(t *testing.T) {
 		require.NoError(t, env.exec(taskSQL))
 
 		// While the task is in flight (pending or retrying), executing the
-		// same statement again is rejected by the filter-derived unique id.
+		// same statement again is rejected by the fixed one-shot unique id.
 		err := env.exec(taskSQL)
 		require.Error(t, err, "identical in-flight task must be rejected")
 		assert.Contains(t, err.Error(), "goque_jobs_unique_uidx")

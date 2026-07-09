@@ -596,13 +596,12 @@ func (s *Pipeline[T]) processOneShot(ctx context.Context, job que.Job, req *Extr
 }
 
 // enqueueOneShotJob enqueues a one-shot job. Unlike enqueueJob it applies no
-// time-window math. The job's UniqueID is derived from the filter (see
-// OneShotUniqueID) with que.Lockable lifecycle: while a task is in flight an
-// identical filter cannot be enqueued again; tasks with different filters
-// coexist. Next-page jobs carry the same filter and thus the same UniqueID —
-// destroying the previous page and inserting the next in one transaction
-// hands the id over, keeping the whole task exclusive until its last page
-// completes or a page expires.
+// time-window math. Every one-shot job carries the fixed OneShotUniqueID
+// with que.Lockable lifecycle, so at most one task per queue is in flight at
+// a time — across all replicas. Next-page jobs carry the same id: destroying
+// the previous page and inserting the next in one transaction hands it over,
+// keeping the whole task exclusive until its last page completes or a page
+// expires.
 func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *ExtractRequest[T], runAt time.Time) error {
 	if len(req.OneShotFilter) == 0 {
 		return errors.New("filter is required for one-shot job")
@@ -611,13 +610,12 @@ func (s *Pipeline[T]) enqueueOneShotJob(ctx context.Context, tx *sql.Tx, req *Ex
 		return errors.New("filter must be valid JSON")
 	}
 
-	uniqueID := OneShotUniqueID(req.OneShotFilter)
 	plan := que.Plan{
 		Queue:           s.QueueName,
 		Args:            que.Args(req),
 		RunAt:           runAt,
 		RetryPolicy:     *s.RetryPolicy,
-		UniqueID:        &uniqueID,
+		UniqueID:        &OneShotUniqueID,
 		UniqueLifecycle: que.Lockable,
 	}
 

@@ -277,17 +277,19 @@ Semantics:
 - On failure the job retries per `RetryPolicy` and is expired (with the
   error recorded) when retries are exhausted. The circuit breaker only
   governs the incremental chain.
-- One-shot jobs get a `unique_id` derived from the filter bytes (see
-  `OneShotUniqueID`) with `Lockable` lifecycle: while a task is in flight, an
-  identical filter cannot be double-fired — re-executing the same statement
-  violates the `goque_jobs` unique constraint; completion or expiry releases
-  the id so the same filter can be fired again. Tasks with different filters
-  coexist.
+- Every one-shot job carries the fixed `unique_id` `etl_oneshot` (see
+  `OneShotUniqueID`) with `Lockable` lifecycle. The `goque_jobs` unique
+  constraint is scoped to `(queue, unique_id)`, so this serializes tasks
+  queue-wide — even across replicas: while a task is in flight, submitting
+  another statement (same or different filter) violates the constraint;
+  completion or expiry releases the id and the next task can be submitted.
+  This also guarantees one-shot staging tables are never used by two tasks
+  concurrently.
 - A job whose args do not match the pipeline's mode (e.g. a filtered job
   inserted into an incremental queue) is expired immediately.
-- Hand-written inserts remain possible; give them a human-readable
-  `unique_id` (e.g. a ticket number like `etl_oneshot_KGM-1234`) with
-  `unique_lifecycle = 3` (Lockable).
+- Hand-written inserts remain possible; give them the same `unique_id`
+  (`etl_oneshot`) with `unique_lifecycle = 3` (Lockable) so they participate
+  in the same queue-wide serialization.
 
 ### Custom Cursor Types
 
