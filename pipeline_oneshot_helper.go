@@ -11,62 +11,6 @@ import (
 	"github.com/samber/lo"
 )
 
-// MarshalOneShotFilter encodes a source-defined filter struct into the opaque form
-// carried by ExtractRequest.OneShotFilter. The framework never interprets the
-// content; each Source defines its own filter schema.
-func MarshalOneShotFilter(v any) (json.RawMessage, error) {
-	if v == nil {
-		return nil, errors.New("filter is nil")
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to marshal filter")
-	}
-	// A typed nil pointer marshals to "null" without an error; a null filter
-	// would decode into a zero-value struct downstream, so reject it here.
-	if bytes.Equal(b, []byte("null")) {
-		return nil, errors.New("filter must not encode to null")
-	}
-	return b, nil
-}
-
-// UnmarshalOneShotFilter decodes ExtractRequest.OneShotFilter into the source-defined
-// filter struct F. Unknown fields, trailing data and a bare JSON null are
-// rejected so that a typo in a manually crafted job (e.g. "idz" instead of
-// "ids") fails loudly instead of silently matching nothing.
-func UnmarshalOneShotFilter[F any](filter json.RawMessage) (*F, error) {
-	if len(filter) == 0 {
-		return nil, errors.New("filter is empty")
-	}
-	// json.Decoder decodes a bare null into the zero value without an error —
-	// the silent-zero failure mode this function exists to prevent.
-	if bytes.Equal(bytes.TrimSpace(filter), []byte("null")) {
-		return nil, errors.New("filter must not be null")
-	}
-	dec := json.NewDecoder(bytes.NewReader(filter))
-	dec.DisallowUnknownFields()
-	f := new(F)
-	if err := dec.Decode(f); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal filter")
-	}
-	if dec.More() {
-		return nil, errors.New("unexpected trailing data after filter")
-	}
-	return f, nil
-}
-
-// OneShotUniqueID is the queue-level unique id shared by every one-shot job,
-// mirroring the incremental chain's UniqueID ("etl_pipeline"). Uniqueness is
-// scoped per queue by the goque_jobs (queue, unique_id) index, and with the
-// que.Lockable lifecycle it serializes one-shot tasks at the queue level:
-// while a task is in flight — across all replicas — submitting another one
-// violates the unique constraint; completion or expiry releases the id.
-// Next-page jobs carry the same id (destroy + insert in one transaction
-// hands it over), keeping the whole task exclusive until its last page
-// completes or a page expires. This also guarantees one-shot staging tables
-// are never used by two tasks concurrently.
-var OneShotUniqueID = "etl_oneshot"
-
 // OneShotJobSQLInput describes the one-shot job to submit.
 // F is the Source-defined filter schema: the filter is authored as a typed
 // struct in code (compile-checked), then rendered into the SQL document.
@@ -110,9 +54,17 @@ func BuildOneShotJobSQL[T any, F any](in *OneShotJobSQLInput[T, F]) (string, err
 		return "", errors.New("SeedCursor is required; use the cursor zero value (e.g. &etl.Cursor{})")
 	}
 
-	filter, err := MarshalOneShotFilter(in.Filter)
+	if lo.IsNil(in.Filter) {
+		return "", errors.New("filter is nil")
+	}
+	filter, err := json.Marshal(in.Filter)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "failed to marshal filter")
+	}
+	// A typed nil pointer marshals to "null" without an error; a null filter
+	// would decode into a zero-value struct downstream, so reject it here.
+	if bytes.Equal(filter, []byte("null")) {
+		return "", errors.New("filter must not encode to null")
 	}
 
 	req := &ExtractRequest[T]{
@@ -138,20 +90,20 @@ func BuildOneShotJobSQL[T any, F any](in *OneShotJobSQLInput[T, F]) (string, err
 	sql := fmt.Sprintf(
 		`INSERT INTO goque_jobs (queue, run_at, args, retry_policy, unique_id, unique_lifecycle)
 VALUES (%s, now(), %s, %s, %s, %d);`,
-		QuoteLiteral(in.QueueName),
-		QuoteLiteral(string(args)),
-		QuoteLiteral(string(retryPolicy)),
-		QuoteLiteral(OneShotUniqueID),
+		quoteLiteral(in.QueueName),
+		quoteLiteral(string(args)),
+		quoteLiteral(string(retryPolicy)),
+		quoteLiteral(OneShotUniqueID),
 		que.Lockable,
 	)
 	return sql, nil
 }
 
-// QuoteLiteral quotes a 'literal' (e.g. a parameter, often used to pass literal
+// quoteLiteral quotes a 'literal' (e.g. a parameter, often used to pass literal
 // to DDL and other statements that do not accept parameters) to be used as part
 // of an SQL statement.  For example:
 //
-//	exp_date := QuoteLiteral("2023-01-05 15:00:00Z")
+//	exp_date := quoteLiteral("2023-01-05 15:00:00Z")
 //	err := db.Exec(fmt.Sprintf("CREATE ROLE my_user VALID UNTIL %s", exp_date))
 //
 // Any single quotes in name will be escaped. Any backslashes (i.e. "\") will be
@@ -161,7 +113,7 @@ VALUES (%s, now(), %s, %s, %s, %d);`,
 // Copied from github.com/lib/pq's QuoteLiteral (strings.Replace modernized to
 // strings.ReplaceAll) — vendoring the spec-frozen 8-line algorithm instead of
 // importing the maintenance-mode driver.
-func QuoteLiteral(literal string) string {
+func quoteLiteral(literal string) string {
 	// This follows the PostgreSQL internal algorithm for handling quoted literals
 	// from libpq, which can be found in the "PQEscapeStringInternal" function,
 	// which is found in the libpq/fe-exec.c source file:

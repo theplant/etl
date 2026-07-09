@@ -250,12 +250,16 @@ applies):
 func (s *MySource) Extract(ctx context.Context, req *etl.ExtractRequest[*etl.Cursor]) (*etl.ExtractResponse[*etl.Cursor], error) {
     // ...
     if req.OneShotFilter != nil {
-        filter, err := etl.UnmarshalOneShotFilter[MyFilter](req.OneShotFilter) // rejects unknown fields and null
-        if err != nil {
+        // Decoding the opaque filter is the Source's obligation. Decode
+        // strictly and reject an empty predicate, so a hand-written job with
+        // a typo (e.g. "idz") or an empty filter ({}) fails loudly instead
+        // of silently syncing nothing.
+        var filter MyFilter
+        dec := json.NewDecoder(bytes.NewReader(req.OneShotFilter))
+        dec.DisallowUnknownFields()
+        if err := dec.Decode(&filter); err != nil {
             return nil, err
         }
-        // Guard against an accidentally empty filter (e.g. {}): an empty
-        // predicate would silently sync nothing and report success.
         if len(filter.IDs) == 0 {
             return nil, errors.New("filter must specify at least one id")
         }

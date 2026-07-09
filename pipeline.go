@@ -595,6 +595,8 @@ func (s *Pipeline[T]) processOneShot(ctx context.Context, job que.Job, req *Extr
 	})
 }
 
+var OneShotUniqueID = "etl_oneshot"
+
 // enqueueOneShotJob enqueues a one-shot job. Unlike enqueueJob it applies no
 // time-window math. Every one-shot job carries the fixed OneShotUniqueID
 // with que.Lockable lifecycle, so at most one task per queue is in flight at

@@ -3,6 +3,7 @@ package etl_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -326,7 +327,7 @@ func TestOneShotPipeline(t *testing.T) {
 
 		// Pagination: 3 extract pages; the filter is carried unchanged across
 		// pages while the cursor advances; the time window stays unused.
-		expectedFilter, err := etl.MarshalOneShotFilter(targeted)
+		expectedFilter, err := json.Marshal(targeted)
 		require.NoError(t, err)
 		reqs := source.requests()
 		require.Len(t, reqs, 3, "9 ids with PageSize 4 should extract in 3 pages")
@@ -361,7 +362,7 @@ func TestOneShotPipeline(t *testing.T) {
 			`SELECT args, unique_id, unique_lifecycle FROM goque_jobs WHERE queue = $1`, queue).
 			Scan(&argsJSON, &uniqueID, &lifecycle))
 
-		expectedFilter, err := etl.MarshalOneShotFilter(quotedFilter)
+		expectedFilter, err := json.Marshal(quotedFilter)
 		require.NoError(t, err)
 		assert.Equal(t, etl.OneShotUniqueID, uniqueID)
 		assert.Equal(t, int(que.Lockable), lifecycle)
