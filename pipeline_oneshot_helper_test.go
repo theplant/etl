@@ -21,7 +21,7 @@ type helperFilter struct {
 
 func TestBuildOneShotJobSQL(t *testing.T) {
 	t.Run("renders the full statement deterministically", func(t *testing.T) {
-		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			QueueName:  "q1",
 			PageSize:   4,
 			SeedCursor: &Cursor{},
@@ -43,7 +43,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 	})
 
 	t.Run("escapes quotes and backslashes in rendered values", func(t *testing.T) {
-		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		sqlText, err := BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			QueueName:   "q'1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
@@ -57,31 +57,31 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 	})
 
 	t.Run("validates its input", func(t *testing.T) {
-		_, err := BuildOneShotJobSQL[*Cursor](nil)
+		_, err := BuildOneShotJobSQL[*Cursor, helperFilter](nil)
 		assert.Error(t, err, "nil input must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			PageSize:    4,
 			Filter:      helperFilter{IDs: []string{"a"}},
 			RetryPolicy: bus.DefaultRetryPolicyFactory(),
 		})
 		assert.Error(t, err, "missing QueueName must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			QueueName:   "q1",
 			Filter:      helperFilter{IDs: []string{"a"}},
 			RetryPolicy: bus.DefaultRetryPolicyFactory(),
 		})
 		assert.Error(t, err, "missing PageSize must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			QueueName: "q1",
 			PageSize:  4,
 			Filter:    helperFilter{IDs: []string{"a"}},
 		})
 		assert.Error(t, err, "missing RetryPolicy must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			QueueName:   "q1",
 			PageSize:    4,
 			Filter:      helperFilter{IDs: []string{"a"}},
@@ -89,7 +89,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		})
 		assert.Error(t, err, "nil SeedCursor must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, *helperFilter]{
 			QueueName:   "q1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
@@ -98,16 +98,16 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		})
 		assert.Error(t, err, "nil filter must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, nullFilter]{
 			QueueName:   "q1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
-			Filter:      (*helperFilter)(nil),
+			Filter:      nullFilter{},
 			RetryPolicy: bus.DefaultRetryPolicyFactory(),
 		})
-		assert.Error(t, err, "typed nil pointer filter (encodes to JSON null) must be rejected")
+		assert.Error(t, err, "filter encoding to JSON null must be rejected")
 
-		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor]{
+		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, chan int]{
 			QueueName:   "q1",
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
@@ -117,6 +117,13 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		assert.Error(t, err, "unmarshalable filters must surface the marshal error")
 	})
 }
+
+// nullFilter marshals to JSON null despite being a non-nil value, reaching
+// the encodes-to-null guard (plain nil values are caught earlier by the nil
+// check).
+type nullFilter struct{}
+
+func (nullFilter) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
 
 // TestQuoteLiteral pins the PostgreSQL literal-quoting algorithm that
 // BuildOneShotJobSQL relies on to keep rendered values inert: quote doubling,
