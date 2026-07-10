@@ -21,11 +21,11 @@ import (
 
 // PipelineMode selects the pipeline's scheduling behavior. The values are
 // strings so the mode is self-describing wherever it leaks — logs, errors,
-// debuggers. The empty string is treated as PipelineModeIncremental.
+// debuggers. Mode is required: Validate rejects the empty string.
 type PipelineMode string
 
 const (
-	// PipelineModeIncremental is the default: a self-perpetuating chain of
+	// PipelineModeIncremental runs a self-perpetuating chain of
 	// time-window jobs — the seed job sweeps history, every completed job
 	// enqueues the next window, and the circuit breaker guards against
 	// runaway skip-and-continue.
@@ -64,9 +64,9 @@ type PipelineConfig[T any] struct {
 	Interval         time.Duration
 	ConsistencyDelay time.Duration
 
-	// Mode selects the scheduling behavior. Leaving it empty selects
-	// PipelineModeIncremental, so existing configurations keep their
-	// behavior unchanged.
+	// Mode selects the scheduling behavior. It is required and must be
+	// PipelineModeIncremental or PipelineModeOneShot; Validate rejects any
+	// other value, including the empty string.
 	Mode PipelineMode
 
 	// Retry and circuit breaker configuration
@@ -110,7 +110,7 @@ func (c *PipelineConfig[T]) Validate() error {
 	}
 
 	switch c.Mode {
-	case PipelineModeIncremental, "":
+	case PipelineModeIncremental:
 		// These parameters only drive the incremental chain mode
 		// (time-window scheduling and circuit breaker).
 		if c.Interval <= 0 {

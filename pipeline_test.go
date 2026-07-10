@@ -44,6 +44,7 @@ func TestIdentitySyncer(t *testing.T) {
 		QueueDB:                 pipelineSQLDB,
 		QueueName:               "identity_system_etl",
 		PageSize:                10,
+		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second, // Shorter interval for faster testing
 		ConsistencyDelay:        1 * time.Second, // Shorter delay for faster testing
 		RetryPolicy:             bus.DefaultRetryPolicyFactory(),
@@ -788,6 +789,7 @@ func TestPipeline_BQTarget(t *testing.T) {
 		QueueDB:                 pipelineSQLDB,
 		QueueName:               "identity_system_etl_bq_target",
 		PageSize:                10,
+		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second, // Shorter interval for faster testing
 		ConsistencyDelay:        1 * time.Second, // Shorter delay for faster testing
 		RetryPolicy:             bus.DefaultRetryPolicyFactory(),

@@ -343,6 +343,7 @@ func TestIdentitySyncer_Optimized(t *testing.T) {
 		QueueDB:                 pipelineSQLDB,
 		QueueName:               "optimized_identity_etl",
 		PageSize:                10,
+		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second,
 		ConsistencyDelay:        1 * time.Second,
 		RetryPolicy:             bus.DefaultRetryPolicyFactory(),
