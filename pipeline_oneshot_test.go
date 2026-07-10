@@ -260,6 +260,7 @@ func (e *oneShotEnv) startChain(t *testing.T, queue string) {
 		QueueDB:                 e.queueDB,
 		QueueName:               queue,
 		PageSize:                10,
+		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second,
 		ConsistencyDelay:        1 * time.Second,
 		RetryPolicy:             bus.DefaultRetryPolicyFactory(),
@@ -501,6 +502,19 @@ func TestOneShotPipeline(t *testing.T) {
 			RetryPolicy: bus.DefaultRetryPolicyFactory(),
 		})
 		assert.Error(t, err, "an unknown Mode must be rejected instead of falling through to either behavior")
+	})
+
+	t.Run("empty pipeline mode is rejected", func(t *testing.T) {
+		_, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
+			Source:    env.syncer(),
+			QueueDB:   env.queueDB,
+			QueueName: "mode_validation_etl",
+			PageSize:  4,
+			// Mode left empty: there is no implicit incremental default, so
+			// a config that forgets to set it must fail loudly.
+			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+		})
+		assert.Error(t, err, "an empty Mode must be rejected instead of silently defaulting to incremental")
 	})
 }
 

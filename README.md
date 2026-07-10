@@ -111,6 +111,7 @@ func main() {
         QueueDB:                 pipelineDB,
         QueueName:               "my_etl",
         PageSize:                100,
+        Mode:                    etl.PipelineModeIncremental,
         Interval:                5 * time.Minute,
         ConsistencyDelay:        10 * time.Second,
         RetryPolicy:             bus.DefaultRetryPolicyFactory(),
