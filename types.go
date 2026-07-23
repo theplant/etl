@@ -19,8 +19,20 @@ type Target interface {
 	// This internally handles prepare, write, commit operations
 	Load(ctx context.Context) error
 
-	// Cleanup cleans up resources (staging tables, temp files, etc.)
-	// Only called on successful completion to allow error data debugging
+	// Cleanup cleans up resources (staging tables, temp files, etc.).
+	//
+	// It is called by the pipeline only after Load succeeds, and its failure is
+	// non-fatal (logged/notified, the job still succeeds). Skipping it on error
+	// is deliberate: the staging tables are left behind so a failed sync can be
+	// debugged. This is why Load must NOT clean up on its own success path for
+	// resources this method owns.
+	//
+	// Cleanup only reaps connection-independent staging (real tables: pgtarget
+	// UNLOGGED, bqtarget). Connection-scoped resources — pgtarget's default TEMP
+	// staging tables — live only on the connection Load holds and are cleaned
+	// inside Load when it releases that connection; they cannot be reached from
+	// here (a later call on an arbitrary pooled connection), so for those Cleanup
+	// is a no-op.
 	Cleanup(ctx context.Context) error
 }
 

@@ -2,6 +2,7 @@ package pgtarget
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -19,6 +20,17 @@ import (
 // CommitInput represents the input for committing staging tables to target tables
 type CommitInput[T any] struct {
 	*Target[T]
+	// DB is bound to the single database connection that owns the staging
+	// tables. With the default session-scoped TEMP staging tables the staging
+	// tables exist only on this one connection, so CommitFunc MUST run every
+	// staging-table statement (the MERGE, etc.) through this DB. Reaching for
+	// Target.DB or any other pooled handle runs on a different connection that
+	// cannot see the staging tables and fails with SQLSTATE 42P01.
+	//
+	// This field intentionally shadows the DB promoted from the embedded
+	// *Target, so existing CommitFuncs that already use input.DB transparently
+	// target the correct connection.
+	DB            *gorm.DB
 	StagingTables map[string]string
 }
 
@@ -170,7 +182,47 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 		return nil // Nothing to write
 	}
 
-	db := t.DB.WithContext(ctx)
+	// Staging tables default to session-scoped TEMP tables: they live only on
+	// the connection that created them. GORM draws a connection from the pool
+	// per statement, so create/insert/commit would otherwise run on different
+	// sessions and the staging table would not be found (SQLSTATE 42P01) —
+	// intermittently, whenever the pool hands out a different connection.
+	// Pin one dedicated connection and run the entire load on it. (UNLOGGED
+	// staging tables are real shared tables that any connection can see, so
+	// they would not strictly need this, but pinning is harmless and keeps a
+	// single code path.)
+	sqlDB, err := t.DB.DB()
+	if err != nil {
+		return errors.Wrap(err, "failed to get sql.DB")
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return errors.Wrap(err, "failed to acquire dedicated connection")
+	}
+	defer func() {
+		// Conn.Close returns the connection to the pool (it does not physically
+		// close it). See the DISCARD TEMP defer below for session cleanup.
+		if cerr := conn.Close(); cerr != nil && xerr == nil {
+			xerr = errors.Wrap(cerr, "failed to release dedicated connection")
+		}
+	}()
+
+	db := bindConn(ctx, t.DB, conn)
+
+	// For TEMP staging tables, reset the session before the connection returns
+	// to the pool so no temp table rides along and pollutes a connection a
+	// later job (or unrelated caller) may reuse. Runs on success and failure —
+	// a TEMP table on a pooled connection can never be inspected for debugging
+	// anyway. A detached context ensures a cancelled job still cleans up.
+	if !t.UseUnloggedTable {
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if _, derr := conn.ExecContext(cleanupCtx, "DISCARD TEMP"); derr != nil {
+				spanKVs["discard_temp_error"] = derr.Error()
+			}
+		}()
+	}
 
 	// Record database start time at the beginning of Load (only needed for UNLOGGED tables)
 	// This will be verified at the end to detect database restarts during the Load process
@@ -179,7 +231,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 	var initialStartedAt time.Time
 	if t.UseUnloggedTable {
 		var err error
-		initialStartedAt, err = t.getDBStartedAt(ctx)
+		initialStartedAt, err = t.getDBStartedAt(ctx, db)
 		if err != nil {
 			return err
 		}
@@ -244,6 +296,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 	// Note: commitFunc may modify staging table data (e.g., deduplication, incremental updates)
 	if _, err := t.CommitFunc(ctx, &CommitInput[T]{
 		Target:        t,
+		DB:            db,
 		StagingTables: t.stagingTables,
 	}); err != nil {
 		return errors.Wrap(err, "commit function failed")
@@ -254,7 +307,7 @@ func (t *Target[T]) Load(ctx context.Context) (xerr error) {
 	// All other failures (write errors, I/O errors, etc.) return explicit errors
 	// TEMP TABLE doesn't need this check because it's automatically cleaned up on session end
 	if t.UseUnloggedTable {
-		currentStartedAt, err := t.getDBStartedAt(ctx)
+		currentStartedAt, err := t.getDBStartedAt(ctx, db)
 		if err != nil {
 			return err
 		}
@@ -281,6 +334,15 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
+	// TEMP staging tables are session-scoped: they were discarded when Load
+	// released its dedicated connection (see the DISCARD TEMP defer in Load),
+	// so there is nothing left to drop here. Only real UNLOGGED staging tables
+	// survive Load and need an explicit drop.
+	if !t.UseUnloggedTable {
+		t.stagingTables = make(map[string]string)
+		return nil
+	}
+
 	// Drop staging tables in reverse order (reverse dependency order)
 	for i := len(t.Datas) - 1; i >= 0; i-- {
 		stagingTable := t.stagingTables[t.Datas[i].Table]
@@ -296,17 +358,40 @@ func (t *Target[T]) Cleanup(ctx context.Context) (xerr error) {
 	return nil
 }
 
-// getDBStartedAt returns the PostgreSQL database start time
-func (t *Target[T]) getDBStartedAt(ctx context.Context) (startedAt time.Time, xerr error) {
+// getDBStartedAt returns the PostgreSQL database start time. It runs on the
+// provided db so it can share Load's pinned connection: querying the pool
+// instead would deadlock when the pool is capped at a single connection (Load
+// already holds it).
+func (t *Target[T]) getDBStartedAt(ctx context.Context, db *gorm.DB) (startedAt time.Time, xerr error) {
 	ctx, _ = logtracing.StartSpan(ctx, "pgtarget.getDBStartedAt")
 	defer func() {
 		logtracing.EndSpan(ctx, xerr)
 	}()
 
-	if err := t.DB.WithContext(ctx).Raw("SELECT pg_postmaster_start_time()").Scan(&startedAt).Error; err != nil {
+	if err := db.WithContext(ctx).Raw("SELECT pg_postmaster_start_time()").Scan(&startedAt).Error; err != nil {
 		return time.Time{}, errors.Wrap(err, "failed to query database start time")
 	}
 	return startedAt, nil
+}
+
+// bindConn returns a *gorm.DB that runs every statement on the single
+// dedicated connection conn while inheriting db's configuration (naming
+// strategy, plugins, logger, etc.). Session copies the config and clones the
+// statement, so swapping ConnPool here does not affect the shared db. This
+// mirrors how gorm's own Begin binds a *sql.Tx by setting Statement.ConnPool.
+//
+// Do NOT "simplify" this to gorm.Open(postgres.New(postgres.Config{Conn: conn})).
+// That builds a bare *gorm.DB and drops everything the caller's db was opened
+// with — for gormx that means the tracing / omit-associations / soft-delete
+// plugins and the QueryFields/TranslateError/CreateBatchSize config. Losing
+// OmitAssociations alone would change what Create writes into the staging
+// table. Setting Statement.ConnPool is the only way to keep that config while
+// pinning the connection; gorm v2 exposes no public equivalent.
+func bindConn(ctx context.Context, db *gorm.DB, conn *sql.Conn) *gorm.DB {
+	session := db.Session(&gorm.Session{Context: ctx})
+	session.ConnPool = conn
+	session.Statement.ConnPool = conn
+	return session
 }
 
 // tableNameRegex validates that table name starts with letter or underscore,
