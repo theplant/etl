@@ -1,6 +1,6 @@
 module github.com/theplant/etl
 
-go 1.26.0
+go 1.26.10
 
 require (
 	cloud.google.com/go/bigquery v1.72.0
