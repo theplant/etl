@@ -15,7 +15,6 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"github.com/pkg/errors"
-	"github.com/qor5/go-bus"
 	"github.com/qor5/go-que/pg"
 	"github.com/qor5/x/v3/gormx"
 	"github.com/samber/lo"
@@ -47,7 +46,7 @@ func TestIdentitySyncer(t *testing.T) {
 		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second, // Shorter interval for faster testing
 		ConsistencyDelay:        1 * time.Second, // Shorter delay for faster testing
-		RetryPolicy:             bus.DefaultRetryPolicyFactory(),
+		RetryPolicy:             defaultRetryPolicy(),
 		CircuitBreakerThreshold: 3,
 		CircuitBreakerCooldown:  60 * time.Second,
 	})
@@ -792,7 +791,7 @@ func TestPipeline_BQTarget(t *testing.T) {
 		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second, // Shorter interval for faster testing
 		ConsistencyDelay:        1 * time.Second, // Shorter delay for faster testing
-		RetryPolicy:             bus.DefaultRetryPolicyFactory(),
+		RetryPolicy:             defaultRetryPolicy(),
 		CircuitBreakerThreshold: 3,
 		CircuitBreakerCooldown:  60 * time.Second,
 	})

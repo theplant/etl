@@ -5,8 +5,7 @@ go 1.26.10
 require (
 	cloud.google.com/go/bigquery v1.72.0
 	github.com/pkg/errors v0.9.1
-	github.com/qor5/go-bus v0.1.2
-	github.com/qor5/go-que v1.1.1
+	github.com/qor5/go-que v1.2.0
 	github.com/qor5/x/v3 v3.2.1-0.20260602032452-ea2dcdcd625e
 	github.com/samber/lo v1.52.0
 	github.com/stretchr/testify v1.11.1
@@ -87,8 +86,8 @@ require (
 	github.com/huandu/go-clone v1.7.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.9.2 // indirect
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/jackc/pgx/v5 v5.12.0 // indirect
+	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/jjeffery/errors v1.0.3 // indirect
@@ -117,6 +116,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/qor5/confx v0.0.0-20250426065316-0d28db5b4d54 // indirect
+	github.com/qor5/go-bus v0.1.2 // indirect
 	github.com/redis/go-redis/v9 v9.16.0 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
