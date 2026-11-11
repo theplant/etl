@@ -10,7 +10,6 @@ import (
 	"github.com/theplant/etl/pgtarget"
 
 	"github.com/pkg/errors"
-	"github.com/qor5/go-bus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -346,7 +345,7 @@ func TestIdentitySyncer_Optimized(t *testing.T) {
 		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second,
 		ConsistencyDelay:        1 * time.Second,
-		RetryPolicy:             bus.DefaultRetryPolicyFactory(),
+		RetryPolicy:             defaultRetryPolicy(),
 		CircuitBreakerThreshold: 3,
 		CircuitBreakerCooldown:  60 * time.Second,
 	})

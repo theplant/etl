@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"github.com/qor5/go-bus/quex"
 	"github.com/qor5/go-que"
 	"github.com/qor5/go-que/pg"
+	"github.com/qor5/go-que/supervisor"
 	"github.com/qor5/x/v3/goquex"
 	"github.com/qor5/x/v3/sqlx"
 	"github.com/samber/lo"
@@ -167,14 +167,14 @@ func NewPipeline[T any](conf *PipelineConfig[T]) (*Pipeline[T], error) {
 // the seed job; for one-shot pipelines it only starts the worker (seedCursor
 // is unused) — jobs are submitted by executing SQL rendered with
 // BuildOneShotJobSQL.
-func (s *Pipeline[T]) Start(ctx context.Context, seedCursor T) (quex.WorkerController, error) {
+func (s *Pipeline[T]) Start(ctx context.Context, seedCursor T) (supervisor.WorkerController, error) {
 	if !s.oneShot() {
 		if err := s.enqueueSeedJob(ctx, seedCursor); err != nil {
 			return nil, err
 		}
 	}
 
-	worker, err := quex.StartWorker(ctx, que.WorkerOptions{
+	worker, err := supervisor.StartWorker(ctx, que.WorkerOptions{
 		Mutex:   s.queue.Mutex(),
 		Queue:   s.QueueName,
 		Perform: goquex.PerformWithTracing(s.Notifier)(s.Process),

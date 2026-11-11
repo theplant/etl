@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/qor5/go-bus"
 	"github.com/qor5/go-que"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,7 +47,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
 			Filter:      helperFilter{IDs: []string{"o'brien", `back\slash`}},
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		require.NoError(t, err)
 		assert.Contains(t, sqlText, `'q''1'`, "queue name quote must be doubled")
@@ -63,14 +62,14 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			PageSize:    4,
 			Filter:      helperFilter{IDs: []string{"a"}},
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "missing QueueName must be rejected")
 
 		_, err = BuildOneShotJobSQL(&OneShotJobSQLInput[*Cursor, helperFilter]{
 			QueueName:   "q1",
 			Filter:      helperFilter{IDs: []string{"a"}},
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "missing PageSize must be rejected")
 
@@ -85,7 +84,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 			QueueName:   "q1",
 			PageSize:    4,
 			Filter:      helperFilter{IDs: []string{"a"}},
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "nil SeedCursor must be rejected")
 
@@ -94,7 +93,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
 			Filter:      nil,
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "nil filter must be rejected")
 
@@ -103,7 +102,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
 			Filter:      nullFilter{},
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "filter encoding to JSON null must be rejected")
 
@@ -112,7 +111,7 @@ VALUES ('q1', now(), '[{"After":{"at":"0001-01-01T00:00:00Z","id":""},"First":4,
 			PageSize:    4,
 			SeedCursor:  &Cursor{},
 			Filter:      make(chan int),
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "unmarshalable filters must surface the marshal error")
 	})

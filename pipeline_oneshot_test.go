@@ -12,7 +12,6 @@ import (
 	"github.com/theplant/etl"
 
 	"github.com/pkg/errors"
-	"github.com/qor5/go-bus"
 	"github.com/qor5/go-que"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -187,7 +186,7 @@ func (e *oneShotEnv) waitExpired(t *testing.T, queue string, n int) {
 func (e *oneShotEnv) buildSQL(t *testing.T, queue string, filter OptimizedUserFilter, policy *que.RetryPolicy) string {
 	t.Helper()
 	if policy == nil {
-		policy = bus.DefaultRetryPolicyFactory()
+		policy = defaultRetryPolicy()
 	}
 	sqlText, err := etl.BuildOneShotJobSQL(&etl.OneShotJobSQLInput[*etl.Cursor, OptimizedUserFilter]{
 		QueueName:   queue,
@@ -232,7 +231,7 @@ func (e *oneShotEnv) insertRawJob(t *testing.T, queue, args string) {
 func (e *oneShotEnv) startOneShot(t *testing.T, queue string, source etl.Source[*etl.Cursor], policy *que.RetryPolicy) {
 	t.Helper()
 	if policy == nil {
-		policy = bus.DefaultRetryPolicyFactory()
+		policy = defaultRetryPolicy()
 	}
 	pipeline, err := etl.NewPipeline(&etl.PipelineConfig[*etl.Cursor]{
 		Source:      source,
@@ -263,7 +262,7 @@ func (e *oneShotEnv) startChain(t *testing.T, queue string) {
 		Mode:                    etl.PipelineModeIncremental,
 		Interval:                3 * time.Second,
 		ConsistencyDelay:        1 * time.Second,
-		RetryPolicy:             bus.DefaultRetryPolicyFactory(),
+		RetryPolicy:             defaultRetryPolicy(),
 		CircuitBreakerThreshold: 3,
 		CircuitBreakerCooldown:  60 * time.Second,
 	})
@@ -499,7 +498,7 @@ func TestOneShotPipeline(t *testing.T) {
 			QueueName:   "mode_validation_etl",
 			PageSize:    4,
 			Mode:        "banana",
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "an unknown Mode must be rejected instead of falling through to either behavior")
 	})
@@ -512,7 +511,7 @@ func TestOneShotPipeline(t *testing.T) {
 			PageSize:  4,
 			// Mode left empty: there is no implicit incremental default, so
 			// a config that forgets to set it must fail loudly.
-			RetryPolicy: bus.DefaultRetryPolicyFactory(),
+			RetryPolicy: defaultRetryPolicy(),
 		})
 		assert.Error(t, err, "an empty Mode must be rejected instead of silently defaulting to incremental")
 	})
